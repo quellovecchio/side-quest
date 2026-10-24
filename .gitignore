@@ -1,0 +1,28 @@
+# dipendenze e build
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# log
+*.log
+npm-debug.log*
+
+# ambiente locale
+.env
+.env.*
+!.env.example
+
+# Claude Code: impostazioni personali e worktree (launch.json resta condiviso)
+.claude/settings.local.json
+.claude/worktrees/
+
+# editor e sistema
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
