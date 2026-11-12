@@ -4,8 +4,9 @@ import { Color4, Matrix, Mesh, Quaternion, Scene, Vector3, VertexData } from "@b
 export class Geo {
   p: number[] = []; n: number[] = []; uv: number[] = []; c: number[] = []; idx: number[] = [];
 
-  vert(p: Vector3, n: Vector3, u: number, v: number, ao = 1): number {
-    this.p.push(p.x, p.y, p.z); this.n.push(n.x, n.y, n.z); this.uv.push(u, v); this.c.push(ao, ao, ao, 1);
+  vert(p: Vector3, n: Vector3, u: number, v: number, ao = 1, tint?: [number, number, number]): number {
+    this.p.push(p.x, p.y, p.z); this.n.push(n.x, n.y, n.z); this.uv.push(u, v);
+    if (tint) this.c.push(ao * tint[0], ao * tint[1], ao * tint[2], 1); else this.c.push(ao, ao, ao, 1);
     return this.p.length / 3 - 1;
   }
 

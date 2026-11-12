@@ -53,6 +53,7 @@ uniform vec4 cloudShape, cloudWind, cloudSun;
 uniform vec3 sunDisc;            // direzione VERA del sole (verso il sole)
 uniform vec3 moonDir, moonCol;   // verso la luna, colore gia' pesato sulla visibilita'
 uniform float stars;
+uniform float moonVeil;         // Side Quest: quanto la luna traspare dalle nubi (cielo coperto)
 ${CLOUD_FUNCS}
 
 // distanza lungo d fino al guscio a quota h sopra una Terra di raggio R (stabile anche verso lo zenit)
@@ -92,7 +93,9 @@ void main() {
   }
   // luna: disco pallido con un alone stretto
   float cm = dot(d, normalize(moonDir));
-  col = mix(col, moonCol, smoothstep(0.99925, 0.99945, cm));
+  // ⚠️ max(): di giorno moonCol è nero (pesato sulla visibilità) e il disco bucherebbe il cielo.
+  // In footie-stars non si vede perché le camere guardano in basso; qui si alza lo sguardo.
+  col = mix(col, max(col, moonCol), smoothstep(0.99925, 0.99945, cm));
   col += moonCol * pow(max(cm, 0.0), 400.0) * 0.25;
 
   if (e > 0.0) {
@@ -128,6 +131,10 @@ void main() {
     }
   }
 
+  // Side Quest: sotto un cielo coperto la luna non sparisce dietro le nubi (fa luce e ombre: si deve capire da dove):
+  // ne traspare il disco, smorzato, in un alone largo
+  col += moonCol * moonVeil * (smoothstep(0.99925, 0.99945, cm) * 0.4 + pow(max(cm, 0.0), 700.0) * 0.3 + pow(max(cm, 0.0), 60.0) * 0.1);
+
   // sole: disco pieno e due aloni, sopra le nuvole solo dove sono sottili (sotto l'orizzonte lo copre la piana)
   float disc = smoothstep(0.99935, 0.99955, cd);
   col = mix(col, sunColor, disc);
@@ -142,6 +149,8 @@ void main() {
 export class Sky {
   readonly mesh: Mesh;
   private mat: ShaderMaterial;
+  /** Side Quest: quanto la luna traspare dalle nubi (0 = solo negli squarci). Lo decide lo stile, prima di `setDay`. */
+  moonVeil = 0;
 
   /** `land`: il colore sotto l'orizzonte (Side Quest: la nebbia della foresta). */
   constructor(private scene: Scene, day: DayLight, private land: Color3) {
@@ -155,7 +164,7 @@ export class Sky {
       attributes: ["position"],
       uniforms: ["world", "viewProjection", "camPos", "zenith", "midSky", "horizon", "haze", "land", "sunColor",
         "cloudLit", "cloudMid", "cloudShadowCol", "cloudRim", "cloudShape", "cloudWind", "cloudSun",
-        "sunDisc", "moonDir", "moonCol", "stars"],
+        "sunDisc", "moonDir", "moonCol", "stars", "moonVeil"],
     });
     this.mat.backFaceCulling = false;
     this.mesh.material = this.mat;
@@ -188,6 +197,7 @@ export class Sky {
     m.setVector3("moonDir", day.moonDir);
     m.setColor3("moonCol", new Color3(0.93, 0.95, 1.0).scale(day.moonVis));
     m.setFloat("stars", day.stars);
+    m.setFloat("moonVeil", this.moonVeil);
     m.setColor3("cloudLit", day.cloudLit);
     m.setColor3("cloudMid", day.cloudMid);
     m.setColor3("cloudShadowCol", day.cloudShadow);

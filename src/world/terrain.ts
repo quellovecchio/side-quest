@@ -1,41 +1,112 @@
 import { GroundMesh, MeshBuilder, RawTexture, Scene, Texture, VertexBuffer, VertexData } from "@babylonjs/core";
 import { clamp, fbm2, smoothstep } from "./noise";
+import { DbError, type Db, type LocationDef } from "../data/db";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TERRENO — una conca boscosa di 320 m: colline morbide, una radura dove si
 // nasce (con le pietre erette), un sentiero che serpeggia nel bosco, e i bordi
-// che salgono a crinali rocciosi (il confine naturale della demo).
+// che salgono a crinali rocciosi. A est il terreno prosegue per altri 160 m: una
+// strada lascia il sentiero, taglia il crinale in una gola e scende alla città,
+// su un piano spianato in una valle di colline. È tutto la stessa mesh: fra bosco
+// e città non c'è nessun caricamento.
 // Tutto discende da funzioni pure (altezza, sentiero, densità del bosco): le usano
 // la mesh, la splat map del materiale e il piazzamento della vegetazione.
+// DOVE stanno radura, città, sentieri e strade lo dice db.json (`locations`, `roads`):
+// `layWorld` lo legge una volta, prima che si generi qualunque cosa.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** La conca del bosco. */
 export const WORLD = 320;
 export const HALF = WORLD / 2;
-export const SPAWN = { x: 0, z: -6 };
+/** Quanto il terreno prosegue a est della conca (la valle della città). */
+export const EAST = 160;
+// ⚠️ Questi valori arrivano dal file con `layWorld`: sono gli stessi oggetti per tutta la partita (si riempiono sul posto)
+// e vanno letti solo DENTRO le funzioni, mai al caricamento di un modulo (lì sono ancora vuoti).
+/** Dove comincia la partita (il luogo `spawn` del file). */
+export const SPAWN = { x: 0, z: 0 };
 
-// Il sentiero: dalla radura verso nord-est, poi giù a sud-ovest nel fitto.
-const PATH: [number, number][] = [
-  [-120, -95], [-95, -70], [-70, -58], [-45, -38], [-22, -22], [0, -6], [14, 10], [22, 34], [18, 58],
-  [30, 80], [55, 92], [85, 98], [112, 118],
-];
-
-/** Distanza dal sentiero (m). */
-export function pathDist(x: number, z: number): number {
-  // il tracciato ondeggia un po' fra i punti di controllo, per non sembrare tirato col righello
-  const wx = x + fbm2(x / 30, z / 30, 2, 91) * 4, wz = z + fbm2(x / 30, z / 30, 2, 92) * 4;
-  let d = Infinity;
-  for (let i = 0; i < PATH.length - 1; i++) {
-    const [ax, az] = PATH[i], [bx, bz] = PATH[i + 1];
-    const dx = bx - ax, dz = bz - az;
-    const t = clamp(((wx - ax) * dx + (wz - az) * dz) / (dx * dx + dz * dz));
-    d = Math.min(d, Math.hypot(wx - ax - dx * t, wz - az - dz * t));
-  }
-  return d;
+/** Dove si arriva in un luogo (partenza, viaggio rapido): il suo posto d'arrivo (`arrive`) guardando dove guarda il posto, o il suo centro. */
+export function arrival(l: LocationDef): { x: number; z: number; look?: { x: number; z: number } } {
+  const s = l.arrive ? l.spots[l.arrive] : undefined;
+  if (!s) return { x: l.at[0], z: l.at[1] };
+  const x = l.at[0] + s.at[0], z = l.at[1] + s.at[1], a = s.yaw * Math.PI / 180;
+  return { x, z, look: { x: x + Math.sin(a) * 10, z: z + Math.cos(a) * 10 } };
+}
+/** La città: centro, mezzi lati del rettangolo delle mura, quota del piano. La porta è a ovest, in (x − hx, z). */
+export const TOWN = { x: 0, z: 0, hx: 0, hz: 0, y: 0 };
+type Line = [number, number][];
+/**
+ * Una discesa nel sottosuolo (i luoghi `crypt` e `cave`): dove comincia (x, z), verso dove scende (dx, dz: un asse), quanto è
+ * lunga la rampa e quanto scende, la camera in fondo, e il rettangolo di terreno che le va tolto (sulla griglia da un metro).
+ * La geometria la fa `underground.ts`; qui serve a bucare il terreno e a chi chiede la quota (`Levels`).
+ */
+export interface Pit { id: string; kind: "crypt" | "cave"; x: number; z: number; dx: number; dz: number; len: number; depth: number; room: [number, number]; rect: [number, number, number, number] }
+export const PITS: Pit[] = [];
+function pit(l: LocationDef): Pit {
+  const a = l.yaw! * Math.PI / 180, dx = Math.round(Math.sin(a)), dz = Math.round(Math.cos(a)), len = Math.ceil(l.depth! * 1.9);
+  // sulla griglia: lungo la discesa su un intero, di traverso a metà cella (la trincea è larga tre metri)
+  const x = dx ? Math.round(l.at[0]) : Math.floor(l.at[0]) + 0.5, z = dz ? Math.round(l.at[1]) : Math.floor(l.at[1]) + 0.5;
+  const ex = x + dx * len, ez = z + dz * len, hx = dx ? 0 : 1.5, hz = dz ? 0 : 1.5;
+  return { id: l.id, kind: l.kind as Pit["kind"], x, z, dx, dz, len, depth: l.depth!, room: l.room!, rect: [Math.min(x, ex) - hx, Math.min(z, ez) - hz, Math.max(x, ex) + hx, Math.max(z, ez) + hz] };
 }
 
-const spawnDist = (x: number, z: number): number => Math.hypot(x - SPAWN.x, z - SPAWN.z);
+/** Distanza dalla trincea più vicina (0 dentro): erba, felci e cespugli non ci crescono sopra. */
+export const pitDist = (x: number, z: number): number => Math.min(1e9, ...PITS.map(({ rect: [x0, z0, x1, z1] }) => Math.hypot(Math.max(0, x0 - x, x - x1), Math.max(0, z0 - z, z - z1))));
 
-/** Quanto si è verso il bordo della conca, 0..1. */
+/** Le radure, i sentieri, e le strade che scendono alla città (l'ultimo punto è la porta). */
+let CLEARINGS: Line = [], TRAILS: Line[] = [], ROADS: Line[] = [];
+
+/** Posa il mondo come dice il file. Va chiamata prima di generare terreno, bosco e città. */
+export function layWorld(db: Db): void {
+  const town = db.locations.find((l) => l.kind === "settlement")!, start = db.locations.find((l) => l.id === db.spawn)!;
+  Object.assign(TOWN, { x: town.at[0], z: town.at[1], hx: town.ground!.rect[0], hz: town.ground!.rect[1], y: town.ground!.level });
+  // la città con il suo margine (la strada che arriva, il piano che si raccorda) deve stare sul terreno
+  if (TOWN.x - TOWN.hx < -HALF + 15 || TOWN.x + TOWN.hx > HALF + EAST - 15 || Math.abs(TOWN.z) + TOWN.hz > HALF - 15) throw new DbError(`db.json.locations: "${town.id}" esce dal terreno (x da ${-HALF + 15} a ${HALF + EAST - 15}, z entro ±${HALF - 15}, mura comprese)`);
+  // ⚠️ SPAWN è la RADURA (rocce e piante la lasciano sgombra), non dove comincia la partita: quello è `db.spawn`, e lo usa main.ts
+  const glade = db.locations.find((l) => l.kind === "clearing") ?? start;
+  Object.assign(SPAWN, { x: glade.at[0], z: glade.at[1] });
+  PITS.length = 0;
+  PITS.push(...db.locations.filter((l) => l.kind === "crypt" || l.kind === "cave").map(pit));
+  CLEARINGS = db.locations.filter((l) => l.kind === "clearing").map((l) => l.at);
+  TRAILS = db.roads.filter((d) => d.kind === "trail").map((d) => d.line);
+  ROADS = db.roads.filter((d) => d.kind === "road").map((d): Line => [...d.line, [TOWN.x - TOWN.hx, TOWN.z]]);
+}
+
+/** Distanza da una spezzata e ascissa lungo di essa (0 all'inizio, 1 alla fine). */
+function along(line: [number, number][], x: number, z: number): { d: number; t: number } {
+  let d = Infinity, t = 0;
+  for (let i = 0; i < line.length - 1; i++) {
+    const [ax, az] = line[i], [bx, bz] = line[i + 1];
+    const dx = bx - ax, dz = bz - az;
+    const k = clamp(((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz));
+    const e = Math.hypot(x - ax - dx * k, z - az - dz * k);
+    if (e < d) { d = e; t = (i + k) / (line.length - 1); }
+  }
+  return { d, t };
+}
+
+/** Distanza fuori dal rettangolo delle mura (0 dentro). */
+export function townDist(x: number, z: number): number {
+  return Math.hypot(Math.max(0, Math.abs(x - TOWN.x) - TOWN.hx), Math.max(0, Math.abs(z - TOWN.z) - TOWN.hz));
+}
+
+// i tracciati ondeggiano un po' fra i punti di controllo, per non sembrare tirati col righello
+// (non vicino alla città: la strada deve infilare la porta)
+function wobble(x: number, z: number): [number, number] {
+  const k = 4 * smoothstep(4, 30, townDist(x, z));
+  return [x + fbm2(x / 30, z / 30, 2, 91) * k, z + fbm2(x / 30, z / 30, 2, 92) * k];
+}
+
+/** Distanza dal sentiero o dalla strada (m). La strada è più larga: conta un metro e mezzo in meno. */
+export function pathDist(x: number, z: number): number {
+  const [wx, wz] = wobble(x, z);
+  return Math.min(...TRAILS.map((t) => along(t, wx, wz).d), ...ROADS.map((r) => along(r, wx, wz).d - 1.5));
+}
+
+/** Distanza dalla radura più vicina. */
+const spawnDist = (x: number, z: number): number => Math.min(...CLEARINGS.map(([cx, cz]) => Math.hypot(x - cx, z - cz)));
+
+/** Quanto si è verso il bordo della conca, 0..1 (fuori dalla conca vale 1: è tutto monte). */
 function edge(x: number, z: number): number {
   const e = Math.max(Math.abs(x), Math.abs(z)) * 0.55 + Math.hypot(x, z) * 0.45;
   return smoothstep(95, 158, e + fbm2(x / 40, z / 40, 3, 93) * 14);
@@ -44,65 +115,90 @@ function edge(x: number, z: number): number {
 export function terrainHeight(x: number, z: number): number {
   const broad = fbm2(x / 110, z / 110, 4, 1) * 10;
   let h = broad + fbm2(x / 28, z / 28, 4, 2) * 2.2 + fbm2(x / 7, z / 7, 2, 3) * 0.25;
-  // crinali ai bordi: rumore "ridged" che sale fino a ~40 m
+  const td = townDist(x, z), [wx, wz] = wobble(x, z);
+  // crinali ai bordi: rumore "ridged" che sale fino a ~40 m; attorno alla città si abbassano a colline (una valle, non un pozzo)
   const e = edge(x, z);
   const ridge = 1 - Math.abs(fbm2(x / 45, z / 45, 4, 4));
-  h += e * e * (28 + ridge * 22);
+  h += e * e * (28 + ridge * 22) * (0.22 + 0.78 * smoothstep(15, 95, td));
   // radura: si spiana verso la quota del rumore largo
   const flat = 1 - smoothstep(10, 30, spawnDist(x, z));
   h = h + (broad * 0.5 - h) * flat * 0.85;
   // sentiero: segue la quota larga, spianato e appena incassato
-  const p = 1 - smoothstep(1.5, 5, pathDist(x, z));
-  h = h + (broad + fbm2(x / 28, z / 28, 2, 2) * 1.5 - 0.15 - h) * p * 0.8;
+  const track = broad + fbm2(x / 28, z / 28, 2, 2) * 1.5 - 0.15;
+  for (const t of TRAILS) h = h + (track - h) * (1 - smoothstep(1.5, 5, along(t, wx, wz).d)) * 0.8;
+  // strada: parte come il sentiero, poi si allarga in una gola che taglia il crinale e scende alla quota della città
+  for (const road of ROADS) {
+    const r = along(road, wx, wz), g = smoothstep(0.1, 0.45, r.t);
+    const level = track + (TOWN.y - track) * smoothstep(0.2, 0.8, r.t);
+    h += (level - h) * (1 - smoothstep(1.5 + 4.5 * g, 5 + 27 * g, r.d)) * (0.8 + 0.2 * g);
+  }
+  // il piano della città
+  h += (TOWN.y - h) * (1 - smoothstep(0, 22, td));
   return h;
 }
 
-/** Densità del bosco 0..1 (fuori dalla radura e dal sentiero, a chiazze con prati). */
+/** Densità del bosco 0..1 (fuori dalla radura, dal sentiero e dalla città, a chiazze con prati). */
 export function forestDensity(x: number, z: number): number {
   const n = fbm2(x / 55, z / 55, 4, 7) * 0.5 + 0.5;
   let d = smoothstep(0.34, 0.56, n);
   d *= smoothstep(16, 34, spawnDist(x, z));
   d *= 1 - edge(x, z) * 0.35;
+  d *= smoothstep(8, 32, townDist(x, z));
   return d;
 }
 
 export interface Terrain {
   mesh: GroundMesh;
   splat: Texture;
+  /** Il rettangolo coperto dalla splat map: [x0, z0, larghezza, profondità]. */
+  rect: [number, number, number, number];
   height(x: number, z: number): number;
 }
 
 export function createTerrain(scene: Scene): Terrain {
-  const sub = 320;
-  const mesh = MeshBuilder.CreateGround("terrain", { width: WORLD, height: WORLD, subdivisions: sub, updatable: true }, scene);
+  const W = WORLD + EAST;
+  // celle da 1 m; la mesh è centrata, e spostata a est di mezzo prolungamento
+  const mesh = MeshBuilder.CreateGround("terrain", { width: W, height: WORLD, subdivisionsX: W, subdivisionsY: WORLD, updatable: true }, scene);
   const pos = mesh.getVerticesData(VertexBuffer.PositionKind)!;
-  for (let i = 0; i < pos.length; i += 3) pos[i + 1] = terrainHeight(pos[i], pos[i + 2]);
+  for (let i = 0; i < pos.length; i += 3) pos[i + 1] = terrainHeight(pos[i] + EAST / 2, pos[i + 2]);
   mesh.updateVerticesData(VertexBuffer.PositionKind, pos);
   const normals: number[] = [];
   VertexData.ComputeNormals(pos, mesh.getIndices()!, normals);
   mesh.updateVerticesData(VertexBuffer.NormalKind, normals);
+  // le discese nel sottosuolo: via i triangoli sopra ogni trincea (le quote restano: le legge ancora chi chiede l'altezza)
+  if (PITS.length) {
+    const idx = mesh.getIndices()!, keep: number[] = [];
+    for (let i = 0; i < idx.length; i += 3) {
+      const cx = (pos[idx[i] * 3] + pos[idx[i + 1] * 3] + pos[idx[i + 2] * 3]) / 3 + EAST / 2, cz = (pos[idx[i] * 3 + 2] + pos[idx[i + 1] * 3 + 2] + pos[idx[i + 2] * 3 + 2]) / 3;
+      if (!PITS.some(({ rect: [x0, z0, x1, z1] }) => cx > x0 && cx < x1 && cz > z0 && cz < z1)) keep.push(idx[i], idx[i + 1], idx[i + 2]);
+    }
+    mesh.setIndices(keep);
+  }
+  mesh.position.x = EAST / 2;
+  mesh.computeWorldMatrix(true);
   mesh.updateCoordinateHeights();
   mesh.refreshBoundingInfo();
   mesh.freezeWorldMatrix();
   mesh.receiveShadows = true;
 
-  // Splat map: R sentiero, G sottobosco (sotto gli alberi), B variazione macro, A umidità/muschio
-  const S = 512;
-  const data = new Uint8Array(S * S * 4);
-  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
-    const x = (i / (S - 1) - 0.5) * WORLD, z = (j / (S - 1) - 0.5) * WORLD;
-    const k = (j * S + i) * 4;
-    const pd = pathDist(x, z);
-    data[k] = (1 - smoothstep(1.2, 3.2, pd + fbm2(x / 3, z / 3, 2, 95) * 0.8)) * 255;
+  // Splat map: R terra battuta (sentiero, strada, città), G sottobosco (sotto gli alberi), B variazione macro, A umidità/muschio
+  const SX = 768, SZ = 512;   // 0,625 m per texel
+  const data = new Uint8Array(SX * SZ * 4);
+  for (let j = 0; j < SZ; j++) for (let i = 0; i < SX; i++) {
+    const x = -HALF + (i / (SX - 1)) * W, z = (j / (SZ - 1) - 0.5) * WORLD;
+    const k = (j * SX + i) * 4;
+    const [wx, wz] = wobble(x, z), n = fbm2(x / 3, z / 3, 2, 95) * 0.8;
+    const dirt = Math.max(...TRAILS.map((t) => 1 - smoothstep(1.2, 3.2, along(t, wx, wz).d + n)), ...ROADS.map((r) => 1 - smoothstep(2.4, 4.6, along(r, wx, wz).d + n)), 1 - smoothstep(1, 6, townDist(x, z) + n * 2));
+    data[k] = dirt * 255;
     const fd = forestDensity(x, z);
     data[k + 1] = smoothstep(0.25, 0.75, fd + fbm2(x / 9, z / 9, 3, 96) * 0.25) * 255;
     data[k + 2] = (fbm2(x / 35, z / 35, 4, 97) * 0.5 + 0.5) * 255;
     data[k + 3] = clamp(fd * 0.9 + fbm2(x / 14, z / 14, 3, 98) * 0.6) * 255;
   }
-  // ⚠️ RawTexture: la riga 0 è z = −HALF, come in uv = xz / WORLD + 0.5 nello shader (invertY = false)
-  const splat = RawTexture.CreateRGBATexture(data, S, S, scene, true, false, Texture.BILINEAR_SAMPLINGMODE);
+  // ⚠️ RawTexture: la riga 0 è z = −HALF, come in uv = (xz − origine) / lato nello shader (invertY = false)
+  const splat = RawTexture.CreateRGBATexture(data, SX, SZ, scene, true, false, Texture.BILINEAR_SAMPLINGMODE);
   splat.wrapU = splat.wrapV = Texture.CLAMP_ADDRESSMODE;
   splat.gammaSpace = false;
 
-  return { mesh, splat, height: (x, z) => mesh.getHeightAtCoordinates(x, z) };
+  return { mesh, splat, rect: [-HALF, -HALF, W, WORLD], height: (x, z) => mesh.getHeightAtCoordinates(x, z) };
 }

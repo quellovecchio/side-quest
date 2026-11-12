@@ -1,0 +1,364 @@
+{
+  "version": 1,
+  "time": {
+    "start": 8, "dayMinutes": 48,
+    "wake": [
+      { "name": "Notte", "hour": 0 },
+      { "name": "Mattino", "hour": 7 },
+      { "name": "Mezzogiorno", "hour": 12 },
+      { "name": "Tramonto", "hour": 18.5 }
+    ]
+  },
+  "creatures": [
+    {
+      "id": "lupo", "name": "Lupo", "model": "wolf",
+      "stats": { "salute": 60, "morso": 9, "passo": 1.5, "corsa": 7.2, "fiuto": 26, "portata": 1.9, "spinta": 3.5, "accerchia": true },
+      "attack": { "carica": 0.42, "balzo": 0.24, "recupero": 0.45, "pausa": 2.0, "slancio": 7 },
+      "loot": { "pelle_lupo": 1 }, "xp": 25
+    },
+    {
+      "id": "ratto", "name": "Ratto gigante", "model": "rat",
+      "stats": { "salute": 22, "morso": 5, "passo": 0.9, "corsa": 5.2, "fiuto": 13, "portata": 1.25, "spinta": 5, "accerchia": false },
+      "attack": { "carica": 0.25, "balzo": 0.16, "recupero": 0.35, "pausa": 0.8, "slancio": 6 },
+      "loot": { "coda_ratto": 1 }, "xp": 8
+    }
+  ],
+  "spawns": [
+    { "creature": "lupo", "at": [55, 48], "count": 3 },
+    { "creature": "lupo", "at": [-72, -40], "count": 3 },
+    { "creature": "ratto", "at": [-20, 24], "count": 3 },
+    { "creature": "ratto", "at": [34, -30], "count": 3 },
+    { "creature": "ratto", "at": [-45, 60], "count": 2 },
+    { "creature": "ratto", "at": [0, 0], "count": 3, "in": "grotta" }
+  ],
+  "npcs": [
+    { "id": "tonio", "name": "Tonio", "look": "monello", "home": "casa10", "speed": 3,
+      "routine": [
+        {"from": "06:30", "stops": [{"at": "casa10.tavolo.1", "act": "sit"}]},
+        {"from": "07:30", "stops": [{"at": "plazaNW", "act": "stand", "stay": [0.4, 1.5]}, {"at": "plazaSE", "act": "stand", "stay": [0.4, 1.5]}, {"at": "plazaN", "act": "stand", "stay": [0.4, 2]}, {"at": "plazaSW", "act": "stand", "stay": [0.4, 1.5]}, {"at": "plazaE", "act": "stand", "stay": [0.4, 2]}, {"at": "plazaW", "act": "stand", "stay": [0.4, 1.5]}]},
+        {"from": "19:00", "stops": [{"at": "casa10.focolare", "act": "stand"}]},
+        {"from": "20:30", "stops": [{"at": "casa10.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Ti gira attorno, guardando la spada.]", "È vera? Taglia? Me la fai tenere?", "Io da grande ammazzo i lupi. Tutti."] },
+    { "id": "lisetta", "name": "Lisetta", "look": "bambina", "home": "casa11", "speed": 2.8,
+      "routine": [
+        {"from": "06:45", "stops": [{"at": "casa11.tavolo.1", "act": "sit"}]},
+        {"from": "07:45", "follow": "tonio"},
+        {"from": "19:00", "stops": [{"at": "casa11.focolare", "act": "stand"}]},
+        {"from": "20:30", "stops": [{"at": "casa11.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Si nasconde dietro la bambola.]", "Tonio dice che nel bosco ci sono i ratti grossi come cani."] },
+    { "id": "berto", "name": "Berto", "look": "garzone", "home": "locanda", "speed": 1.5,
+      "routine": [
+        {"from": "05:30", "stops": [{"at": "locanda.tavolo3.1", "act": "sit"}]},
+        {"from": "06:15", "stops": [{"at": "well", "act": "wash", "stay": [3, 5]}, {"at": "locanda.cucina", "act": "stand", "stay": [3, 5]}, {"at": "well", "act": "wash", "stay": [3, 5]}, {"at": "forge", "act": "stand", "stay": [2, 4]}]},
+        {"from": "20:00", "stops": [{"at": "locanda.cucina", "act": "stand", "stay": [20, 40]}, {"at": "locanda.botti", "act": "stand", "stay": [10, 20]}]},
+        {"from": "23:00", "stops": [{"at": "locanda.camera3.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Posa il secchio, col fiatone.]", "Acqua, legna, acqua, legna. Matilde non mi dà tregua."] },
+    { "id": "agnese", "name": "Agnese", "look": "educanda", "home": "casa12", "speed": 1.3,
+      "routine": [
+        {"from": "05:45", "stops": [{"at": "casa12.tavolo.1", "act": "sit"}]},
+        {"from": "06:45", "follow": "clemenza"},
+        {"from": "19:30", "stops": [{"at": "casa12.focolare", "act": "stand"}]},
+        {"from": "21:00", "stops": [{"at": "casa12.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Abbassa gli occhi.]", "Suor Clemenza dice che non devo parlare coi forestieri."] },
+    { "id": "gualtiero", "name": "Gualtiero", "look": "contadino", "home": "casa13", "speed": 1.1, "social": true,
+      "routine": [
+        {"from": "05:30", "stops": [{"at": "casa13.tavolo.1", "act": "sit"}]},
+        {"from": "06:15", "stops": [{"at": "patch", "act": "work", "stay": [14, 22]}, {"at": "market", "act": "stand", "stay": [5, 9]}, {"at": "patch", "act": "work", "stay": [12, 18]}, {"at": "gate", "act": "stand", "stay": [3, 5]}]},
+        {"from": "19:00", "stops": [{"at": "locanda.tavolo2.1", "act": "sit"}]},
+        {"from": "21:30", "stops": [{"at": "casa13.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Si appoggia alla zappa.]", "La terra qui è dura come la testa del sindaco.", "Se vai nel bosco, resta sul sentiero."] },
+    { "id": "oddo", "name": "Mastro Oddo", "look": "fabbro", "home": "casa14", "speed": 1.1,
+      "routine": [
+        {"from": "05:45", "stops": [{"at": "casa14.tavolo.1", "act": "sit"}]},
+        {"from": "06:30", "stops": [{"at": "forge", "act": "hammer"}]},
+        {"from": "12:30", "stops": [{"at": "locanda.bancone.sgabello2", "act": "sit"}]},
+        {"from": "13:30", "stops": [{"at": "forge", "act": "hammer", "stay": [16, 26]}, {"at": "fucina.tempra", "act": "stand", "stay": [5, 8]}, {"at": "fucina.mantice", "act": "stand", "stay": [5, 8]}]},
+        {"from": "19:30", "stops": [{"at": "locanda.bancone.sgabello2", "act": "sit"}]},
+        {"from": "22:30", "stops": [{"at": "casa14.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Non alza gli occhi dal ferro.]", "Una lama si giudica dal filo, non dal fodero."] },
+    { "id": "ruggero", "name": "Ruggero", "look": "cittadino", "home": "casa15", "speed": 1.15, "social": true,
+      "routine": [
+        {"from": "06:30", "stops": [{"at": "casa15.tavolo.1", "act": "sit"}]},
+        {"from": "07:30", "stops": [{"at": "market", "act": "stand", "stay": [6, 10]}, {"at": "plazaN", "act": "stand", "stay": [4, 8]}, {"at": "board", "act": "stand", "stay": [5, 8]}, {"at": "laneS", "act": "stand", "stay": [3, 5]}]},
+        {"from": "12:30", "stops": [{"at": "casa15.tavolo.1", "act": "sit"}]},
+        {"from": "14:00", "stops": [{"at": "market", "act": "stand", "stay": [6, 10]}, {"at": "plazaN", "act": "stand", "stay": [4, 8]}, {"at": "board", "act": "stand", "stay": [5, 8]}, {"at": "laneS", "act": "stand", "stay": [3, 5]}]},
+        {"from": "19:30", "stops": [{"at": "casa15.tavolo.1", "act": "sit"}]},
+        {"from": "22:00", "stops": [{"at": "casa15.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["Hai visto la bacheca? C'è sempre qualcuno che cerca braccia.", "[Abbassa la voce.]", "Di notte, fuori dalle mura, si sentono i lupi."] },
+    { "id": "berta", "name": "Berta", "look": "lavandaia", "home": "casa07", "speed": 1.1, "social": true,
+      "routine": [
+        {"from": "05:30", "stops": [{"at": "casa07.tavolo.1", "act": "sit"}]},
+        {"from": "06:15", "stops": [{"at": "fountain", "act": "wash", "stay": [12, 18]}, {"at": "well2", "act": "stand", "stay": [4, 8]}, {"at": "laneN", "act": "stand", "stay": [3, 5]}]},
+        {"from": "19:00", "stops": [{"at": "casa07.focolare", "act": "stand"}]},
+        {"from": "21:30", "stops": [{"at": "casa07.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Strizza un lenzuolo.]", "L'acqua della fontana è più dolce di quella del pozzo. Lo sanno tutti."] },
+    { "id": "matilde", "name": "Matilde", "look": "ostessa", "services": { "shop": { "hours": ["06:00", "23:30"], "items": ["pane"] }, "rest": { "cost": 5 } }, "home": "locanda", "speed": 1.15, "social": true,
+      "routine": [
+        {"from": "05:30", "stops": [{"at": "locanda.tavolo3.2", "act": "sit"}]},
+        {"from": "06:00", "stops": [{"at": "locanda.bancone.oste", "act": "stand", "stay": [16, 26]}, {"at": "locanda.focolare", "act": "stand", "stay": [4, 7]}, {"at": "locanda.bancone.oste", "act": "stand", "stay": [10, 16]}, {"at": "market2", "act": "stand", "stay": [5, 8]}]},
+        {"from": "17:00", "stops": [{"at": "locanda.bancone.oste", "act": "stand", "stay": [30, 50]}, {"at": "locanda.focolare", "act": "stand", "stay": [4, 7]}]},
+        {"from": "23:45", "stops": [{"at": "locanda.camera2.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["Benvenuto alla locanda. Le camere sono di sopra.", "[Asciuga un boccale.]", "Se cerchi un letto, la prima porta è libera."] },
+    { "id": "isotta", "name": "Isotta", "look": "cittadina", "home": "casa17", "speed": 1.05, "social": true,
+      "routine": [
+        {"from": "06:30", "stops": [{"at": "casa17.tavolo.1", "act": "sit"}]},
+        {"from": "07:30", "stops": [{"at": "market2", "act": "stand", "stay": [6, 10]}, {"at": "plazaE", "act": "stand", "stay": [4, 8]}, {"at": "church2", "act": "pray", "stay": [6, 10]}]},
+        {"from": "18:30", "stops": [{"at": "casa17.focolare", "act": "stand", "stay": [20, 40]}, {"at": "casa17.camera", "act": "stand", "stay": [10, 20]}]},
+        {"from": "22:00", "stops": [{"at": "casa17.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Ti squadra da capo a piedi.]", "Un forestiero armato. Il sindaco lo sa, che sei qui?"] },
+    { "id": "baldovino", "name": "Baldovino", "look": "mercante", "services": { "shop": { "hours": ["07:00", "18:30"], "items": ["pozione_piccola", "pane", "spada_ferro"] } }, "home": "casa16", "speed": 0.9,
+      "routine": [
+        {"from": "06:00", "stops": [{"at": "casa16.tavola.1", "act": "sit"}]},
+        {"from": "07:00", "stops": [{"at": "stall", "act": "hawk", "stay": [26, 40]}, {"at": "plazaS", "act": "stand", "stay": [3, 5]}]},
+        {"from": "18:30", "stops": [{"at": "casa16.tavola.1", "act": "sit", "stay": [40, 80]}, {"at": "casa16.studio.scrittoio", "act": "stand", "stay": [20, 40]}]},
+        {"from": "22:30", "stops": [{"at": "casa16.camera.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["Stoffe, spezie, ferri! Guarda pure, guardare non costa.", "[Sospira.]", "Le strade non sono più sicure, e i prezzi salgono."],
+      "interactions": [
+        {"on": "talk", "if": {"flag": "benedetto"}, "once": true, "do": [{"say": ["[Ti riconosce e sorride.]", "Padre Anselmo mi ha parlato bene di te. Tieni, per la strada che hai fatto."]}, {"give": {"monete": 20}}]}
+      ] },
+    { "id": "corrado", "name": "Messer Corrado", "look": "sindaco", "home": "casa01", "speed": 1, "social": true,
+      "routine": [
+        {"from": "06:30", "stops": [{"at": "casa01.tavolo.1", "act": "sit"}]},
+        {"from": "07:30", "stops": [{"at": "municipio.studio.scrittoio", "act": "stand"}]},
+        {"from": "10:00", "stops": [{"at": "hall", "act": "oversee", "stay": [12, 20]}, {"at": "plazaN", "act": "oversee", "stay": [6, 10]}, {"at": "street", "act": "oversee", "stay": [4, 6]}]},
+        {"from": "14:00", "stops": [{"at": "municipio.consiglio.scranno1", "act": "sit"}]},
+        {"from": "16:00", "stops": [{"at": "hall", "act": "oversee", "stay": [12, 20]}, {"at": "plazaN", "act": "oversee", "stay": [6, 10]}, {"at": "street", "act": "oversee", "stay": [4, 6]}]},
+        {"from": "19:00", "stops": [{"at": "casa01.tavolo.1", "act": "sit"}]},
+        {"from": "22:00", "stops": [{"at": "casa01.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Si liscia la catena d'oro.]", "Questa città è tranquilla. Vedi di lasciarla com'è."],
+      "interactions": [
+        {"on": "hit", "once": true, "do": [{"say": ["[Arretra, pallido.]", "Metti via quel ferro! Me ne ricorderò, forestiero."]}, {"flag": "sindaco_minacciato"}]},
+        {"on": "talk", "if": {"flag": "sindaco_minacciato"}, "do": [{"say": ["[Tiene d'occhio la tua spada.]", "Non ho niente da dirti."]}]}
+      ] },
+    { "id": "anselmo", "name": "Padre Anselmo", "look": "parroco", "home": "casa02", "speed": 0.95, "social": true,
+      "routine": [
+        {"from": "05:00", "stops": [{"at": "casa02.tavolo.1", "act": "sit"}]},
+        {"from": "05:45", "stops": [{"at": "cattedrale.altare", "act": "pray"}]},
+        {"from": "08:00", "stops": [{"at": "church", "act": "pray", "stay": [14, 22]}, {"at": "plazaE", "act": "stand", "stay": [5, 9]}, {"at": "yard", "act": "pray", "stay": [8, 12]}]},
+        {"from": "18:00", "stops": [{"at": "cattedrale.altare", "act": "pray"}]},
+        {"from": "21:00", "stops": [{"at": "casa02.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Alza gli occhi dal breviario.]", "La torre sud? Non la finiranno mai.", "Va' in pace, figliolo."],
+      "interactions": [
+        {"on": "talk", "if": {"all": [{"hour": [5, 12]}, {"not": {"flag": "sindaco_minacciato"}}]}, "once": true, "do": [{"say": ["Sei mattiniero, forestiero. È raro, di questi tempi.", "[Ti traccia un segno sulla fronte.]", "Passa da Baldovino, al banco: digli che ti mando io."]}, {"heal": 30}, {"flag": "benedetto"}]}
+      ] },
+    { "id": "clemenza", "name": "Suor Clemenza", "look": "suora", "home": "casa03", "speed": 1, "social": true,
+      "routine": [
+        {"from": "05:15", "stops": [{"at": "casa03.tavolo.1", "act": "sit"}]},
+        {"from": "06:00", "stops": [{"at": "cattedrale.banco1.1", "act": "pray"}]},
+        {"from": "07:00", "stops": [{"at": "church2", "act": "pray", "stay": [12, 18]}, {"at": "well", "act": "stand", "stay": [4, 7]}, {"at": "plazaNE", "act": "stand", "stay": [3, 6]}]},
+        {"from": "19:30", "stops": [{"at": "cattedrale.banco1.1", "act": "pray"}]},
+        {"from": "21:00", "stops": [{"at": "casa03.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Fa un cenno col capo.]", "Il Signore veglia anche su chi porta la spada. Forse su di loro di più."] },
+    { "id": "raniero", "name": "Raniero", "look": "avventuriero", "home": "locanda", "speed": 1.25, "social": true,
+      "routine": [
+        {"from": "08:00", "stops": [{"at": "locanda.tavolo1.3", "act": "sit"}]},
+        {"from": "09:00", "stops": [{"at": "board", "act": "crossed", "stay": [10, 16]}, {"at": "gate", "act": "stand", "stay": [5, 8]}, {"at": "plazaW", "act": "crossed", "stay": [6, 10]}]},
+        {"from": "17:30", "stops": [{"at": "locanda.tavolo1.3", "act": "sit"}]},
+        {"from": "23:30", "stops": [{"at": "locanda.camera1.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Ti guarda la spada, poi lo scudo.]", "Lupi a ovest, ratti nella conca. Pagano poco, ma pagano.", "Se vuoi un consiglio: para, poi colpisci."],
+      "interactions": [
+        {"on": "talk", "once": true, "do": [{"say": ["[Ti guarda la spada, poi lo scudo.]", "Cerchi lavoro? C'è una grotta piena di ratti, a nord della strada, appena fuori dalla porta.", "Portami tre code e ti pago."]}, {"quest": "ratti"}]},
+        {"on": "talk", "if": {"all": [{"has": {"coda_ratto": 3}}, {"not": {"flag": "ratti_pagati"}}]}, "once": true, "do": [{"take": {"coda_ratto": 3}}, {"say": ["[Conta le code, storcendo il naso.]", "Tre. Bel lavoro."]}, {"give": {"monete": 40}}, {"say": ["Un'altra cosa: nella cripta, giù nel cimitero, c'è un sarcofago che nessuno ha mai aperto. Io non ci scendo."]}, {"flag": "ratti_pagati"}]}
+      ] },
+    { "id": "ilario", "name": "Maestro Ilario", "look": "mago", "home": "casa04", "speed": 0.8, "social": true,
+      "routine": [
+        {"from": "07:00", "stops": [{"at": "casa04.tavolo.1", "act": "sit"}]},
+        {"from": "08:30", "stops": [{"at": "plazaNE", "act": "ponder", "stay": [12, 20]}, {"at": "plazaSW", "act": "ponder", "stay": [8, 14]}, {"at": "yard", "act": "ponder", "stay": [8, 12]}]},
+        {"from": "18:00", "stops": [{"at": "casa04.focolare", "act": "ponder", "stay": [30, 60]}, {"at": "casa04.camera", "act": "ponder", "stay": [20, 40]}]},
+        {"from": "23:59", "stops": [{"at": "casa04.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Borbotta, senza guardarti.]", "Le pietre della radura sono più vecchie della città. Molto più vecchie."] },
+    { "id": "piero", "name": "Nonno Piero", "look": "vecchio", "home": "casa05", "speed": 0.5,
+      "routine": [
+        {"from": "06:00", "stops": [{"at": "casa05.tavolo.1", "act": "sit"}]},
+        {"from": "07:30", "stops": [{"at": "bench0", "act": "sit", "stay": [40, 70]}, {"at": "plazaNW", "act": "stand", "stay": [5, 8]}]},
+        {"from": "18:00", "stops": [{"at": "casa05.tavolo.1", "act": "sit"}]},
+        {"from": "20:00", "stops": [{"at": "casa05.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Tende l'orecchio.]", "Eh? Parla forte. Ai miei tempi la porta si chiudeva al tramonto."] },
+    { "id": "tecla", "name": "Nonna Tecla", "look": "vecchia", "home": "casa06", "speed": 0.5,
+      "routine": [
+        {"from": "06:00", "stops": [{"at": "casa06.tavolo.1", "act": "sit"}]},
+        {"from": "07:45", "stops": [{"at": "bench1", "act": "sit", "stay": [30, 50]}, {"at": "market", "act": "stand", "stay": [6, 10]}]},
+        {"from": "18:00", "stops": [{"at": "casa06.tavolo.1", "act": "sit"}]},
+        {"from": "20:00", "stops": [{"at": "casa06.letto", "act": "sleep"}]}
+      ],
+      "dialogue": ["[Ti prende il polso con una mano secca.]", "Sei magro. Mangia qualcosa da Matilde, prima di andare a farti ammazzare."],
+      "interactions": [
+        {"on": "use:pane", "once": true, "do": [{"take": {"pane": 1}}, {"say": ["[Prende il pane con due mani.]", "Che Dio te ne renda merito. Tieni: a me non serve più."]}, {"give": {"pozione_piccola": 1}}]}
+      ] }
+  ],
+  "levels": { "xp": 60, "points": 2 },
+  "classes": [
+    { "id": "guerriero", "name": "Guerriero", "text": "forte e duro a morire",
+      "stats": { "forza": 8, "destrezza": 5, "costituzione": 7, "intelligenza": 3, "saggezza": 3, "carisma": 4 },
+      "skillTree": [
+        { "skill": "guardia_salda", "stat": "costituzione", "level": 8 },
+        { "skill": "colpo_pesante", "stat": "forza", "level": 10, "requires": ["guardia_salda"] }
+      ] },
+    { "id": "mago", "name": "Mago", "text": "fragile, ma colpisce da lontano e si cura",
+      "stats": { "forza": 3, "destrezza": 4, "costituzione": 4, "intelligenza": 8, "saggezza": 7, "carisma": 4 },
+      "skillTree": [
+        { "skill": "scintilla", "stat": "intelligenza", "level": 8 },
+        { "skill": "mano_lieve", "stat": "saggezza", "level": 8, "requires": ["scintilla"] },
+        { "skill": "mente_ampia", "stat": "intelligenza", "level": 10 }
+      ] },
+    { "id": "esploratore", "name": "Esploratore", "text": "svelto di gambe e di lingua",
+      "stats": { "forza": 5, "destrezza": 8, "costituzione": 5, "intelligenza": 4, "saggezza": 4, "carisma": 6 },
+      "skillTree": [
+        { "skill": "passo_lesto", "stat": "destrezza", "level": 9 },
+        { "skill": "lingua_sciolta", "stat": "carisma", "level": 7 },
+        { "skill": "mano_lieve", "stat": "saggezza", "level": 6 }
+      ] }
+  ],
+  "skills": [
+    { "id": "guardia_salda", "name": "Guardia salda", "text": "parare costa quasi metà vigore", "kind": "passive", "mods": [{ "stat": "costo.parata", "mul": 0.6 }] },
+    { "id": "colpo_pesante", "name": "Colpo pesante", "text": "un quarto di danno in più", "kind": "passive", "mods": [{ "stat": "danno", "mul": 1.25 }] },
+    { "id": "passo_lesto", "name": "Passo lesto", "text": "si cammina e si corre più in fretta", "kind": "passive", "mods": [{ "stat": "passo", "mul": 1.12 }] },
+    { "id": "lingua_sciolta", "name": "Lingua sciolta", "text": "le botteghe fanno lo sconto", "kind": "passive", "mods": [{ "stat": "prezzi", "mul": 0.85 }] },
+    { "id": "mente_ampia", "name": "Mente ampia", "text": "più magicka", "kind": "passive", "mods": [{ "stat": "magicka.max", "add": 40 }] },
+    { "id": "scintilla", "name": "Scintilla", "text": "un dardo che colpisce chi hai davanti", "kind": "active", "cost": { "magicka": 20 }, "effect": { "cast": "dardo", "power": 30 } },
+    { "id": "mano_lieve", "name": "Mano lieve", "text": "rende un po' di salute", "kind": "active", "cost": { "magicka": 25 }, "effect": { "cast": "cura", "power": 35 } }
+  ],
+  "quests": [
+    { "id": "ratti", "name": "I ratti della grotta",
+      "stages": [
+        { "text": "Procurati tre code di ratto: la grotta è a nord della strada, prima della città.", "at": "grotta.centro", "done": { "has": { "coda_ratto": 3 } } },
+        { "text": "Porta le code a Raniero.", "npc": "raniero", "done": { "flag": "ratti_pagati" } },
+        { "text": "Raniero dice che nella cripta, nel cimitero, c'è un sarcofago mai aperto.", "at": "cripta.fondo", "done": { "opened": "sarcofago_cripta" } }
+      ] }
+  ],
+  "items": [
+    { "id": "pane", "name": "Pane", "kind": "consumable", "value": 2, "use": [{ "heal": 8 }] },
+    { "id": "pozione_piccola", "name": "Pozione piccola", "kind": "consumable", "value": 15, "use": [{ "heal": 40 }] },
+    { "id": "spada_ferro", "name": "Spada di ferro", "kind": "weapon", "value": 40, "equip": { "slot": "mano", "look": "ferro", "stats": { "danno": 0 } } },
+    { "id": "spada_argento", "name": "Spada d'argento", "kind": "weapon", "value": 120, "equip": { "slot": "mano", "look": "argento", "stats": { "danno": 8 } } },
+    { "id": "pelle_lupo", "name": "Pelle di lupo", "kind": "misc", "value": 12 },
+    { "id": "coda_ratto", "name": "Coda di ratto", "kind": "misc", "value": 3 }
+  ],
+  "containers": [
+    { "id": "sarcofago_cripta", "name": "il sarcofago", "at": "cripta.fondo", "items": { "pozione_piccola": 2 }, "monete": 25 },
+    { "id": "forziere_locanda", "name": "il forziere", "at": "locanda.camera1.forziere", "items": { "spada_argento": 1 }, "monete": 10 }
+  ],
+  "player": { "monete": 30, "inventory": { "pane": 1 }, "equipment": ["spada_ferro"] },
+  "spawn": "citta",
+  "locations": [
+    { "id": "radura", "kind": "clearing", "name": "La radura", "at": [0, -6] },
+    { "id": "cripta", "kind": "crypt", "at": [296, 28.5], "yaw": 270, "depth": 4.5, "room": [9, 8] },
+    { "id": "grotta", "kind": "cave", "at": [168, 67.5], "yaw": 90, "depth": 5, "room": [10, 8] },
+    {
+      "id": "citta", "kind": "settlement", "name": "La città", "arrive": "street", "at": [252, 40], "ground": { "rect": [46, 40], "level": 5 },
+      "gate": { "id": "porta", "interior": "porta" },
+      "paving": [
+        { "kind": "lastre", "width": 6, "line": [[-55, 0], [-14, 0]] },
+        { "kind": "cubetti", "width": 26, "line": [[-14, 0], [14, 0]] },
+        { "kind": "lastre.diagonali", "width": 20, "line": [[14, 0], [18.6, 0]] },
+        { "kind": "ciottoli", "width": 4, "line": [[-16, -34], [-16, 38.4]] },
+        { "kind": "ciottoli", "width": 9, "line": [[-16, 18], [-16, 27]] },
+        { "kind": "ciottoli", "width": 3.4, "line": [[-34, 36.7], [-18, 36.7]] },
+        { "kind": "ciottoli", "width": 4, "line": [[12, 15], [31, 15]] },
+        { "kind": "ciottoli", "width": 4, "line": [[12, -15], [44, -15]] }
+      ],
+      "walks": [
+        [[-41, 0], [-28, 0], [-16, 0], [-12.5, 0]],
+        [[-12.5, 0], [-11, 8], [0, 9.5], [11, 8], [12.5, 0], [16, 0]],
+        [[-12.5, 0], [-11, -7], [0, -6.3], [11, -7], [12.5, 0]],
+        [[-16, 0], [-16, 15], [-16, 21.5], [-16, 36.6], [-31, 36.6]],
+        [[-16, 0], [-16, -15], [-16, -30]],
+        [[-11, 8], [-16, 15]],
+        [[-11, -7], [-16, -15]],
+        [[11, -7], [14, -14.8], [30, -14.8]],
+        [[-28, 0], [-33.7, -3.5], [-33.7, -12.5], [-32, -19], [-32, -27.5]],
+        [[-31, 36.6], [-32, 27.5], [-32, 19]],
+        [[-31, 36.6], [-36.6, 33.3]]
+      ],
+      "children": [
+        { "id": "locanda", "prefab": "casa.ricca", "at": [-37.5, 7.9], "yaw": 180, "size": [9, 9], "interior": "locanda" },
+        { "id": "casa01", "prefab": "casa.graticcio", "at": [-28.6, 7.4], "yaw": 180, "size": [6.6, 8], "interior": "casa.graticcio" },
+        { "id": "casa02", "prefab": "casa.graticcio", "at": [-21.9, 7.1], "yaw": 180, "size": [6, 7.4], "interior": "casa.graticcio" },
+        { "id": "casa03", "prefab": "casa.graticcio", "at": [-29.4, -7.4], "size": [6.6, 8], "interior": "casa.graticcio" },
+        { "id": "casa04", "prefab": "casa.graticcio", "at": [-22.2, -6.9], "size": [6.4, 7], "interior": "casa.graticcio" },
+        { "id": "casa05", "prefab": "casa.graticcio", "at": [-24.5, 15.6], "yaw": 90, "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa06", "prefab": "casa.graticcio", "at": [-24.5, 23.4], "yaw": 90, "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa07", "prefab": "casa.povera", "at": [-23.6, 31], "yaw": 90, "size": [6, 6], "interior": "casa.povera" },
+        { "id": "casa08", "prefab": "casa.graticcio", "at": [-24.5, -15.6], "yaw": 90, "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa09", "prefab": "casa.graticcio", "at": [-24.5, -23.2], "yaw": 90, "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa10", "prefab": "casa.povera", "at": [-23.6, -30.6], "yaw": 90, "size": [6, 6], "interior": "casa.povera" },
+        { "id": "casa11", "prefab": "casa.povera", "at": [-38.5, 18], "yaw": 90, "size": [6, 6], "interior": "casa.povera" },
+        { "id": "casa12", "prefab": "casa.povera", "at": [-38.5, 26.5], "yaw": 90, "size": [6.4, 6], "interior": "casa.povera" },
+        { "id": "casa13", "prefab": "casa.povera", "at": [-38.5, -19.5], "yaw": 90, "size": [6, 6], "interior": "casa.povera" },
+        { "id": "casa14", "prefab": "casa.povera", "at": [-38.5, -28.5], "yaw": 90, "size": [6.4, 6], "interior": "casa.povera" },
+        { "id": "casa15", "prefab": "casa.graticcio", "at": [-7.6, -18.8], "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa16", "prefab": "casa.ricca", "at": [0.2, -19.3], "size": [8, 9], "interior": "casa.ricca" },
+        { "id": "casa17", "prefab": "casa.graticcio", "at": [8.1, -18.8], "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa18", "prefab": "casa.graticcio", "at": [17.6, 21.2], "yaw": 180, "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa19", "prefab": "casa.graticcio", "at": [25.4, 21.4], "yaw": 180, "size": [7.4, 8], "interior": "casa.graticcio" },
+        { "id": "casa20", "prefab": "casa.graticcio", "at": [17.6, -21.2], "size": [7, 8], "interior": "casa.graticcio" },
+        { "id": "casa21", "prefab": "casa.graticcio", "at": [25.4, -21.4], "size": [7.4, 8], "interior": "casa.graticcio" },
+        { "id": "cattedrale", "prefab": "cattedrale", "at": [30, 0], "yaw": -90, "interior": "cattedrale" },
+        { "id": "municipio", "prefab": "municipio", "at": [0, 20.5], "yaw": 180, "interior": "municipio" },
+        { "id": "fucina", "prefab": "fucina", "at": [-38, -8.2], "interior": "fucina" },
+        { "id": "pozzo", "prefab": "pozzo", "at": [-13.2, 23.6] },
+        { "id": "fontana", "prefab": "fontana", "at": [0, 0] },
+        { "prefab": "banco", "at": [-8, -10.2], "tint": "vino" },
+        { "prefab": "banco", "at": [0, -10.7], "tint": "ocra" },
+        { "prefab": "banco", "at": [8, -10.2], "tint": "muschio" },
+        { "prefab": "panchina", "at": [-7, 12.2], "yaw": 180 },
+        { "prefab": "panchina", "at": [7, 12.2], "yaw": 180 },
+        { "prefab": "panca.pietra", "at": [16.2, -8.6], "yaw": -90 },
+        { "prefab": "lampione", "at": [-40.5, -2.9] }, { "prefab": "lampione", "at": [-33, 2.9] },
+        { "prefab": "lampione", "at": [-25.5, -2.9] }, { "prefab": "lampione", "at": [-18.8, 2.9] },
+        { "prefab": "lampione", "at": [-13.3, -12.4] }, { "prefab": "lampione", "at": [13.3, -12.4] },
+        { "prefab": "lampione", "at": [-13.3, 12.4] }, { "prefab": "lampione", "at": [13.3, 12.4] },
+        { "prefab": "lampione", "at": [18, -8.2] }, { "prefab": "lampione", "at": [18, 8.2] },
+        { "prefab": "lampione", "at": [-19.8, 18.6] }, { "prefab": "lampione", "at": [-13.4, -26] },
+        { "prefab": "lampione", "at": [-13.4, 33] }, { "prefab": "lampione", "at": [22, -12.6] },
+        { "prefab": "lampione", "at": [-52, 3.4] },
+        { "prefab": "botte", "at": [-33.6, 3] }, { "prefab": "botte", "at": [-34.3, 3.2] },
+        { "prefab": "botte", "at": [11.4, -9.6] }, { "prefab": "botte", "at": [-19.4, -3.1] },
+        { "prefab": "cassa", "at": [-41.8, 3.1], "size": [0.7, 0.7] }, { "prefab": "cassa", "at": [-41.2, 3.1], "size": [0.5, 0.5] },
+        { "prefab": "cassa", "at": [4.4, -11.8], "size": [0.6, 0.6] }, { "prefab": "cassa", "at": [-4.4, -11.6], "size": [0.56, 0.56] },
+        { "prefab": "cassa", "at": [10.6, -10.2], "size": [0.6, 0.6] },
+        { "prefab": "carretto", "at": [11.4, -5.8], "yaw": 28.65 },
+        { "id": "bacheca", "prefab": "bacheca", "at": [-13.2, 6.6], "yaw": 90 },
+        { "id": "orto", "prefab": "orto", "at": [-41.4, 34] },
+        { "id": "cimitero", "prefab": "lapidi", "at": [31.5, -20] }
+      ],
+      "spots": {
+        "gate": { "at": [-41, 1], "yaw": -90 }, "street": { "at": [-28, 1.2], "yaw": 90 },
+        "board": { "at": [-11.9, 6.6], "yaw": -90 }, "forge": { "at": [-37.8, -5.9], "yaw": 180 },
+        "plazaW": { "at": [-12, 0], "yaw": 90 }, "plazaN": { "at": [0, 9.4], "yaw": 180 },
+        "plazaS": { "at": [1.5, -6.2], "yaw": 0 }, "plazaE": { "at": [11.5, 0], "yaw": -90 },
+        "plazaNW": { "at": [-10, 9], "yaw": 137.5 }, "plazaNE": { "at": [10, 9.5], "yaw": -137.5 },
+        "plazaSW": { "at": [-10.5, -8.5], "yaw": 45.8 }, "plazaSE": { "at": [10.2, -4.2], "yaw": -45.8 },
+        "hall": { "at": [2.1, 13.4], "yaw": 180 }, "stall": { "at": [0, -8.9], "yaw": 0 },
+        "market": { "at": [-2.4, -7.3], "yaw": 180 }, "market2": { "at": [7.2, -7.6], "yaw": 180 },
+        "fountain": { "at": [0, 3], "yaw": 180 }, "well": { "at": [-14.6, 22.6], "yaw": 54.4 },
+        "well2": { "at": [-13.2, 22], "yaw": 0 }, "church": { "at": [15.9, 0], "yaw": 90 },
+        "church2": { "at": [15.6, 2.8], "yaw": 90 }, "yard": { "at": [30, -15.4], "yaw": 180 },
+        "bench0": { "at": [-7, 12.2], "yaw": 180 }, "bench1": { "at": [7, 12.2], "yaw": 180 },
+        "patch": { "at": [-38, 33.2], "yaw": 0 }, "laneN": { "at": [-16, 31], "yaw": 0 },
+        "laneS": { "at": [-16, -30], "yaw": 180 }
+      }
+    }
+  ],
+  "roads": [
+    { "id": "sentiero", "kind": "trail", "line": [[-120, -95], [-95, -70], [-70, -58], [-45, -38], [-22, -22], [0, -6], [14, 10], [22, 34], [18, 58], [30, 80], [55, 92], [85, 98], [112, 118]] },
+    { "id": "strada", "kind": "road", "line": [[85, 98], [112, 92], [140, 78], [165, 60], [186, 46]], "to": "citta" }
+  ]
+}

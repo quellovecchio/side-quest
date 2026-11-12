@@ -41,8 +41,109 @@
     #stamina-wrap.flash > div { animation: flash .5s 2; }
     @keyframes flash { 50% { filter: brightness(2.2); } }
 
+    #enemy { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); text-align: center; pointer-events: none; transition: opacity .3s; }
+    #enemy-name { font-size: 13px; letter-spacing: .14em; text-shadow: 0 0 6px #000; }
+    #enemy .bar { position: relative; bottom: auto; width: min(220px, 30vw); height: 9px; margin: 6px auto 0; }
+    #bar-enemy { width: 100%; background: linear-gradient(#c8463a, #7a1d16); }
+    #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      background: radial-gradient(ellipse at center, transparent 45%, rgba(140, 8, 4, .75)); }
+    #dead { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; transition: opacity 1.2s;
+      background: radial-gradient(ellipse at center, rgba(40,0,0,.35), rgba(0,0,0,.85)); }
+    #dead h1 { color: #b8352a; }
     #crosshair { position: fixed; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px; border-radius: 50%; background: var(--ink); opacity: .7; box-shadow: 0 0 3px #000; pointer-events: none; }
-    body.paused #crosshair, body.paused #compass { opacity: 0; }
+    body.paused #crosshair, body.paused #compass, body.paused #prompt { opacity: 0; }
+    #prompt { position: fixed; left: 50%; top: 57%; transform: translateX(-50%); font-size: 14px; letter-spacing: .14em; text-shadow: 0 0 6px #000; pointer-events: none; transition: opacity .15s; }
+    #prompt kbd { font-family: inherit; border: 1px solid var(--ink); border-radius: 2px; padding: 1px 7px; margin-right: 10px; background: rgba(0, 0, 0, .35); }
+    #crosshair.hit { animation: xhit .22s ease-out; }
+    #crosshair.kill { animation: xkill .45s ease-out; }
+    @keyframes xhit { 0% { transform: scale(4.5); background: #fff; box-shadow: 0 0 10px #fff; } 100% { transform: scale(1); } }
+    @keyframes xkill { 0% { transform: scale(8); background: #e2452f; box-shadow: 0 0 16px #e2452f; } 100% { transform: scale(1); } }
+
+    /* dormire (tavola docs/reference/citta/luce-1-ore.svg): il pannello con il quadrante delle ore e i risvegli, e il buio del sonno.
+       Il quadrante ha la mezzanotte in basso e il mezzogiorno in alto; tacche, glifi e rombo li posa sleep.ts con --h (l'ora). */
+    #sleep { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 26px 40px 22px; text-align: center; letter-spacing: .1em;
+      background: radial-gradient(ellipse at 50% 0, rgba(60, 44, 24, .35), transparent 70%), rgba(8, 7, 5, .88); border: 1px solid var(--line);
+      outline: 1px solid rgba(233, 226, 207, .13); outline-offset: -6px; box-shadow: 0 18px 70px rgba(0, 0, 0, .65); transition: opacity .25s; }
+    #sleep > .corner, #talk > .corner, #list > .corner { position: absolute; width: 8px; height: 8px; margin: -4px; background: #d9b45a; transform: rotate(45deg); }
+    :is(#sleep, #talk, #list) > .corner:nth-of-type(1) { left: 0; top: 0; } :is(#sleep, #talk, #list) > .corner:nth-of-type(2) { right: 0; top: 0; }
+    :is(#sleep, #talk, #list) > .corner:nth-of-type(3) { left: 0; bottom: 0; } :is(#sleep, #talk, #list) > .corner:nth-of-type(4) { right: 0; bottom: 0; }
+    #sleep h2 { margin: 0; padding-left: .42em; font-size: 21px; letter-spacing: .42em; font-weight: 600; text-shadow: 0 2px 12px #000; }
+    #sleep .s-rule { position: relative; width: 220px; height: 1px; margin: 13px auto 20px; background: linear-gradient(90deg, transparent, var(--line), transparent); }
+    #sleep .s-rule::after { content: ""; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px; background: #d9b45a; transform: rotate(45deg); }
+    #sleep-body { display: flex; align-items: center; gap: 30px; }
+    #sleep-dial { position: relative; flex: none; width: 156px; height: 156px; --h: 0; }
+    #sleep-dial .ring { position: absolute; inset: 32px; border-radius: 50%;
+      background: conic-gradient(from 180deg, #1c2641 0 19.8%, #9b7f78 23.3%, #cdbb8a 27.1% 76%, #ee8648 78.8%, #34436c 81.7%, #1c2641 87.5% 100%);
+      -webkit-mask: radial-gradient(circle, transparent 0 39px, #000 40px 45.5px, transparent 46.5px); mask: radial-gradient(circle, transparent 0 39px, #000 40px 45.5px, transparent 46.5px); }
+    #sleep-dial .tick, #sleep-dial .g, #sleep-hand { position: absolute; left: 50%; top: 50%; }
+    #sleep-dial .tick { width: 1px; height: 6px; margin: -3px 0 0 -.5px; background: var(--ink); transform: rotate(calc(var(--h) * 15deg + 180deg)) translateY(-53px); }
+    #sleep-dial .g { margin: -7px; transform: rotate(calc(var(--h) * 15deg + 180deg)) translateY(-68px) rotate(calc(var(--h) * -15deg - 180deg)); }
+    #sleep-hand { width: 9px; height: 9px; margin: -4.5px; background: #d9b45a; box-shadow: 0 0 0 2px #080705, 0 0 10px rgba(217, 180, 90, .7);
+      transform: rotate(calc(var(--h) * 15deg + 180deg)) translateY(-43px) rotate(45deg); }
+    #sleep-dial .now { position: absolute; inset: 0; display: grid; place-content: center; gap: 3px; }
+    #sleep-now { font-size: 20px; letter-spacing: .06em; }
+    #sleep-day { font-size: 9px; letter-spacing: .22em; color: var(--dim); text-transform: uppercase; }
+    #sleep-list { display: grid; grid-template-columns: auto auto 1fr auto; gap: 9px 12px; align-items: center; text-align: left; font-size: 15px; min-width: 300px; }
+    #sleep-list kbd { font-family: inherit; font-size: 13px; border: 1px solid var(--ink); border-radius: 2px; padding: 1px 7px; background: rgba(0, 0, 0, .35); }
+    #sleep-list span small { display: block; margin-top: 1px; font: italic 500 14px "Cormorant Garamond", serif; letter-spacing: .02em; color: var(--dim); }
+    #sleep-list b { font-weight: 400; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+    #sleep-list hr { grid-column: 1 / -1; width: 100%; height: 1px; margin: 1px 0; border: 0; background: var(--line); opacity: .55; }
+    #sleep-list .stay { opacity: .62; }
+    #sleep-hint { margin: 18px 0 0; font: italic 500 15px "Cormorant Garamond", serif; letter-spacing: .04em; color: var(--dim); }
+    /* i glifi delle ore: luna, sole basso sull'orizzonte, sole alto */
+    .g { display: inline-block; position: relative; width: 14px; height: 14px; }
+    .g::before, .g::after { content: ""; position: absolute; }
+    .g-moon::before { inset: 1px; border-radius: 50%; box-shadow: inset 4px -2px 0 0 #cfd6dc; }
+    .g-low::before { left: 2px; right: 2px; top: 4px; height: 5px; border-radius: 5px 5px 0 0; background: #e0a05a; }
+    .g-low::after { left: -1px; right: -1px; top: 9px; height: 1px; background: var(--ink); }
+    .g-sun::before { inset: 3.5px; border-radius: 50%; background: #ecdca4; box-shadow: 0 0 0 2px #080705, 0 0 0 3px rgba(236, 220, 164, .55); }
+    /* il buio del sonno: due palpebre che si chiudono e si riaprono; al risveglio, giorno e ora fra due fregi */
+    #fade { position: fixed; inset: 0; pointer-events: none; display: grid; place-content: center; justify-items: center; gap: 16px;
+      font-size: 22px; letter-spacing: .3em; color: transparent;
+      background: linear-gradient(#000 76%, transparent) top / 100% 0 no-repeat, linear-gradient(transparent, #000 24%) bottom / 100% 0 no-repeat;
+      transition: background-size 1.2s cubic-bezier(.3, 0, .2, 1), color .9s; }
+    #fade.on { background-size: 100% 66%, 100% 66%; color: var(--dim); transition: background-size .8s cubic-bezier(.5, 0, .9, .7), color .5s .3s; }
+    #fade::before { content: ""; width: 7px; height: 7px; background: currentColor; transform: rotate(45deg); }
+    #fade::after { content: ""; width: 220px; height: 1px; background: linear-gradient(90deg, transparent, currentColor, transparent); }
+    #fade:empty::before, #fade:empty::after { visibility: hidden; }
+    body.paused #sleep, body.paused #talk, body.paused #list, body.paused #notices, body.paused #quest { display: none; }
+    /* la missione seguita: nome e tappa in corso, in alto a sinistra */
+    #quest { position: fixed; left: 28px; top: 26px; max-width: 300px; text-shadow: 0 0 6px #000, 0 1px 2px #000; pointer-events: none; }
+    #quest-name { display: block; font-size: 12px; font-weight: 600; letter-spacing: .2em; color: #d9b45a; text-transform: uppercase; }
+    #quest-text { display: block; margin-top: 4px; font: italic 500 17px/1.25 "Cormorant Garamond", serif; }
+    #save { display: flex; gap: 12px; justify-content: center; margin-top: 18px; }
+    #save button { font: inherit; font-size: 13px; letter-spacing: .14em; color: var(--ink); background: rgba(0, 0, 0, .35); border: 1px solid var(--line); padding: 7px 18px; cursor: pointer; }
+    #save button:hover { border-color: #d9b45a; color: #d9b45a; }
+    #save button:disabled { opacity: .4; cursor: default; border-color: var(--line); color: var(--ink); }
+    /* ciò che si riceve o si usa: righe che compaiono a sinistra e svaniscono (hud.notice) */
+    #notices { position: fixed; left: 28px; bottom: 96px; display: grid; gap: 6px; font-size: 13px; letter-spacing: .12em; text-shadow: 0 0 6px #000, 0 1px 2px #000; pointer-events: none; }
+    #notices div { animation: notice 4.2s ease-out forwards; }
+    @keyframes notice { 0% { opacity: 0; transform: translateX(-8px); } 8%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+    /* inventario, bottega, banco dell'oste (ui/list.ts): liste di testo, la voce scelta ha il rombo e la riga chiara */
+    #list { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(520px, 86vw); padding: 24px 34px 18px; text-align: center; letter-spacing: .08em;
+      background: radial-gradient(ellipse at 50% 0, rgba(60, 44, 24, .35), transparent 70%), rgba(8, 7, 5, .9); border: 1px solid var(--line);
+      outline: 1px solid rgba(233, 226, 207, .13); outline-offset: -6px; box-shadow: 0 18px 70px rgba(0, 0, 0, .65); }
+    #list h2 { margin: 0; padding-left: .36em; font-size: 20px; letter-spacing: .36em; font-weight: 600; text-transform: uppercase; }
+    #list-sub { margin: 8px 0 12px; font: italic 500 16px "Cormorant Garamond", serif; color: #d9b45a; }
+    #list-tabs { display: flex; justify-content: center; gap: 22px; margin-bottom: 10px; font-size: 12px; letter-spacing: .24em; text-transform: uppercase; }
+    #list-tabs b { font-weight: 400; color: var(--dim); padding-bottom: 3px; } #list-tabs b.on { color: var(--ink); border-bottom: 1px solid #d9b45a; }
+    #list-rows { display: grid; gap: 2px; max-height: 46vh; overflow: hidden; text-align: left; font-size: 15px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 8px 0; }
+    #list-rows div { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 5px 12px 5px 22px; position: relative; }
+    #list-rows div.on { background: rgba(233, 226, 207, .08); }
+    #list-rows div.on::before { content: ""; position: absolute; left: 8px; top: 50%; width: 6px; height: 6px; margin-top: -3px; background: #d9b45a; transform: rotate(45deg); }
+    #list-rows div.off { opacity: .45; }
+    #list-rows small { margin-left: 10px; font: italic 500 14px "Cormorant Garamond", serif; letter-spacing: .02em; color: var(--dim); }
+    #list-rows b { font-weight: 400; font-size: 12px; letter-spacing: .12em; color: var(--dim); white-space: nowrap; }
+    #list-rows p { margin: 10px 0; text-align: center; font: italic 500 16px "Cormorant Garamond", serif; color: var(--dim); }
+    #list-hint { margin: 12px 0 0; font-size: 10px; letter-spacing: .18em; color: var(--dim); text-transform: uppercase; }
+    /* parlare (ui/dialogue.ts): il nome di chi parla e una riga alla volta; in corsivo la narrazione */
+    #talk { position: fixed; left: 50%; bottom: 13%; transform: translateX(-50%); width: min(640px, 80vw); padding: 16px 26px 14px; text-align: center;
+      background: rgba(8, 7, 5, .88); border: 1px solid var(--line); outline: 1px solid rgba(233, 226, 207, .13); outline-offset: -6px; box-shadow: 0 18px 70px rgba(0, 0, 0, .65); }
+    #talk-name { display: block; font-size: 14px; font-weight: 600; letter-spacing: .3em; color: #d9b45a; text-transform: uppercase; }
+    #talk-text { margin: 10px 0 12px; min-height: 2.6em; font: 500 21px/1.3 "Cormorant Garamond", serif; letter-spacing: .02em; }
+    #talk-text.told { font-style: italic; color: var(--dim); }
+    #talk small { font-size: 10px; letter-spacing: .2em; color: var(--dim); }
+    #talk kbd { font-family: inherit; border: 1px solid var(--ink); border-radius: 2px; padding: 0 6px; margin-right: 8px; }
 
     /* overlay */
     #overlay, #loading { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; transition: opacity .6s;
@@ -55,6 +156,10 @@
     .keys { display: grid; grid-template-columns: auto auto; gap: 8px 22px; justify-content: center; font-size: 13px; letter-spacing: .08em; text-align: left; }
     .keys b { color: #d9b45a; font-weight: 600; text-align: right; }
     .go { margin-top: 34px; font-size: 14px; letter-spacing: .3em; animation: pulse 2.4s ease-in-out infinite; }
+    #travel-title { font-size: 13px; letter-spacing: .3em; color: #d9b45a; margin-bottom: 12px; text-transform: uppercase; }
+    #travel { display: flex; gap: 12px; justify-content: center; }
+    #travel button { font: inherit; font-size: 13px; letter-spacing: .14em; color: var(--ink); background: rgba(0, 0, 0, .35); border: 1px solid var(--line); padding: 7px 18px; cursor: pointer; }
+    #travel button:hover { border-color: #d9b45a; color: #d9b45a; }
     #graphics-title { font-size: 13px; letter-spacing: .3em; color: #d9b45a; margin-bottom: 12px; text-transform: uppercase; }
     #graphics { display: grid; gap: 7px; width: min(560px, 92vw); margin: 0 auto; cursor: default; }
     .g-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; font-size: 12px; letter-spacing: .08em; }
@@ -69,6 +174,25 @@
   <canvas id="game"></canvas>
   <div id="compass"><div id="compass-strip"></div></div>
   <div id="crosshair"></div>
+  <div id="prompt" class="hidden"><kbd>E</kbd><span id="prompt-text"></span></div>
+  <div id="enemy" class="hidden"><span id="enemy-name"></span><div class="bar"><div id="bar-enemy"></div></div></div>
+  <div id="hurt"></div>
+  <div id="dead" class="hidden"><h1>SEI MORTO</h1></div>
+  <div id="sleep" class="hidden">
+    <i class="corner"></i><i class="corner"></i><i class="corner"></i><i class="corner"></i>
+    <h2>DORMIRE</h2><div class="s-rule"></div>
+    <div id="sleep-body">
+      <div id="sleep-dial"><div class="ring"></div><div id="sleep-ticks"></div><b id="sleep-hand"></b><div class="now"><span id="sleep-now"></span><small id="sleep-day"></small></div></div>
+      <div id="sleep-list"></div>
+    </div>
+    <p id="sleep-hint">scegli con i tasti numerici</p>
+  </div>
+  <div id="talk" class="hidden"><i class="corner"></i><i class="corner"></i><i class="corner"></i><i class="corner"></i><b id="talk-name"></b><p id="talk-text"></p><small><kbd>E</kbd>continua</small></div>
+  <div id="list" class="hidden"><i class="corner"></i><i class="corner"></i><i class="corner"></i><i class="corner"></i>
+    <h2 id="list-title"></h2><div id="list-sub"></div><div id="list-tabs"></div><div id="list-rows"></div><p id="list-hint"></p></div>
+  <div id="notices"></div>
+  <div id="quest" class="hidden"><b id="quest-name"></b><span id="quest-text"></span></div>
+  <div id="fade"></div>
   <div class="bar" id="magicka-wrap"><div id="bar-magicka"></div></div>
   <div class="bar" id="health-wrap"><div id="bar-health"></div></div>
   <div class="bar hidden" id="stamina-wrap"><div id="bar-stamina"></div></div>
@@ -83,9 +207,18 @@
         <b>Spazio</b><span>Saltare</span>
         <b>Click sinistro</b><span>Attaccare</span>
         <b>Click destro</b><span>Parare con lo scudo</span>
+        <b>E</b><span>Usare, parlare</span>
+        <b>I</b><span>Inventario</span>
+        <b>C</b><span>Personaggio</span>
+        <b>J</b><span>Diario</span>
+        <b>1 2</b><span>Abilità</span>
         <b>Esc</b><span>Pausa</span>
       </div>
       <div class="go">CLICCA PER GIOCARE</div>
+      <div id="save"><button id="save-now">Salva</button><button id="save-load">Carica</button><button id="save-new">Nuova partita</button></div>
+      <div class="rule" style="margin-top:30px"></div>
+      <div id="travel-title">Viaggio rapido</div>
+      <div id="travel"></div>
       <div class="rule" style="margin-top:30px"></div>
       <div id="graphics-title">Grafica</div>
       <div id="graphics"></div>
