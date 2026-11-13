@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "node src/data/db.check.mjs"
+    "check": "node src/data/db.check.mjs && node src/world/vetri.check.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "7.54.3",
+    "@babylonjs/loaders": "7.54.3",
     "@babylonjs/materials": "7.54.3"
   },
   "devDependencies": {

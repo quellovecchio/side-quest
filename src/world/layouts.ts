@@ -19,7 +19,7 @@ export type Side = "x-" | "x+" | "z-" | "z+";
 /** x0, z0, x1, z1. */
 export type Rect = [number, number, number, number];
 export type Finish = "pietra" | "intonaco" | "cotto" | "assi" | "terra" | "lastre";
-export type InteriorKind = "casa.povera" | "casa.graticcio" | "casa.ricca" | "cattedrale" | "municipio" | "porta" | "fucina";
+export type InteriorKind = "locanda" | "casa.povera" | "casa.graticcio" | "casa.ricca" | "cattedrale" | "municipio" | "porta" | "fucina";
 
 /** Una stanza: una scatola vuota col suo pavimento, i suoi quattro muri e il soffitto (piano a travi, o a due falde). */
 export interface Room {
@@ -40,7 +40,9 @@ export interface Room {
  * `varco` = senza anta, `finestra` = una nicchia coi vetri (non si passa). `at` = centro lungo il muro,
  * `y0` e `h` dal pavimento della stanza.
  */
-export interface Opening { kind: "uscio" | "porta" | "varco" | "finestra"; room: string; side: Side; at: number; w: number; h: number; y0: number; to?: string; arch?: boolean }
+export interface Opening { kind: "uscio" | "porta" | "varco" | "finestra"; room: string; side: Side; at: number; w: number; h: number; y0: number; to?: string; arch?: boolean;
+  /** Solo per una finestra: è APERTA sulla facciata (town.ts le apre lo stesso vano) e la nicchia è profonda così, dal filo della stanza fino al vetro di fuori. Senza, la nicchia è chiusa da vetri opachi. Lo controlla vetri.check.mjs. */
+  deep?: number }
 
 /** Una rampa dritta: ingombro, da che parte sale, quote, alzate. `under` = chiusa sotto da un assito. `vano` = quanti metri, dalla cima, è aperto il solaio di sopra. */
 export interface Stair { rect: Rect; up: Side; y0: number; y1: number; n: number; under: boolean; vano: number }
@@ -274,6 +276,14 @@ class Plan {
   L: Layout; rnd: () => number;
   /** Zone da lasciare sgombre (davanti alle porte, le scale) con la quota a cui valgono. */
   keep: { r: Rect; y: number }[] = [];
+  /**
+   * La scala della PIANTA degli edifici a misura fissa (cattedrale, municipio, porta): i loro modelli sono scritti alla misura
+   * di disegno e ogni coordinata in pianta che passa da qui (stanze, vani, scale, nodi, posti, pezzi, `at` lungo un muro) viene
+   * moltiplicata. Le altezze no: le scrive il modello. `put` e `wall` restituiscono il pezzo alla misura di disegno, così si
+   * continua a ragionare lì; uno scarto a misura d'uomo (la sedia a 90 cm dal tavolo) va scritto `P.u(0.9)`.
+   */
+  k = 1;
+  u(v: number): number { return v / this.k; }
   constructor(kind: InteriorKind, cell: number, rnd: () => number) {
     this.L = { kind, cell, rooms: [], openings: [], stairs: [], decks: [], steps: [], rails: [], pieces: [], places: [], links: [] };
     this.rnd = rnd;
@@ -285,10 +295,11 @@ class Plan {
   mix<T>(...a: T[]): T[] { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(this.rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
   room(name: string, rect: Rect, y: number, h: number, floor: Finish, wall: Finish, t: number, extra: Partial<Room> = {}): void {
-    this.L.rooms.push({ name, x0: rect[0], z0: rect[1], x1: rect[2], z1: rect[3], y, h, floor, wall, t, ...extra });
+    this.L.rooms.push({ name, x0: rect[0] * this.k, z0: rect[1] * this.k, x1: rect[2] * this.k, z1: rect[3] * this.k, y, h, floor, wall, t, ...extra });
   }
 
   open(kind: Opening["kind"], room: string, side: Side, at: number, w: number, h: number, y0 = 0, extra: Partial<Opening> = {}): void {
+    at *= this.k; if (kind !== "porta") w *= this.k;   // (le porte fra due stanze restano a misura d'uomo)
     this.L.openings.push({ kind, room, side, at, w, h, y0, ...extra });
     // un metro sgombro davanti al vano, da tutte e due le parti; davanti a una finestra, mezzo metro (niente armadi contro i vetri)
     const r = this.r(room), f = face(r, side), d = f.dir * (kind === "finestra" ? 0.75 : 1.6), a = at - w / 2 - 0.15, b = at + w / 2 + 0.15, lo = Math.min(f.w - d * 0.7, f.w + d), hi = Math.max(f.w - d * 0.7, f.w + d);
@@ -296,22 +307,23 @@ class Plan {
   }
 
   stair(rect: Rect, up: Side, y0: number, y1: number, n: number, under: boolean, vano: number): void {
+    rect = rect.map((v) => v * this.k) as Rect;
     this.L.stairs.push({ rect, up, y0, y1, n, under, vano });
     // sgombri la rampa, un metro al piede e, di sopra, il vano e un metro in cima
     const along = up[0] === "x", sg = up[1] === "+" ? 1 : -1, grow = (r: Rect, lo: number, hi: number): Rect => (along ? [r[0] - lo, r[1], r[2] + hi, r[3]] : [r[0], r[1] - lo, r[2], r[3] + hi]);
     this.keep.push({ r: grow(rect, sg > 0 ? 1 : 0, sg > 0 ? 0 : 1), y: y0 }, { r: grow(rect, sg > 0 ? 0 : 1.1, sg > 0 ? 1.1 : 0), y: y1 });
   }
 
-  node(name: string, x: number, z: number, y: number, deg: number): void { this.L.places.push({ name, x, z, y, deg, node: true }); }
-  spot(name: string, x: number, z: number, y: number, deg: number, on = false): void { this.L.places.push({ name, x, z, y, deg: ((deg % 360) + 360) % 360, node: false, on }); }
+  node(name: string, x: number, z: number, y: number, deg: number): void { this.L.places.push({ name, x: x * this.k, z: z * this.k, y, deg, node: true }); }
+  spot(name: string, x: number, z: number, y: number, deg: number, on = false): void { this.L.places.push({ name, x: x * this.k, z: z * this.k, y, deg: ((deg % 360) + 360) % 360, node: false, on }); }
   /** Collega in fila i nodi dati. */
   link(...names: string[]): void { for (let i = 1; i < names.length; i++) this.L.links.push([names[i - 1], names[i]]); }
 
   /** Posa un pezzo senza guardare (i pezzi che fanno la pianta: focolari, letti, tavole). */
   put(t: PieceId, x: number, z: number, y: number, turn: number, v?: number, foot?: Rect): Piece {
-    const p: Piece = { t, x, z, y, turn: ((turn % 360) + 360) % 360, v, foot };
+    const p: Piece = { t, x: x * this.k, z: z * this.k, y, turn: ((turn % 360) + 360) % 360, v, foot };
     this.L.pieces.push(p);
-    return p;
+    return { ...p, x, z };
   }
 
   /** Qui un arredo ci sta? Non tocca altri arredi né le zone sgombre, e lascia mezzo metro ai percorsi e all'ultimo tratto verso ogni posto. */
@@ -338,9 +350,9 @@ class Plan {
       const fc = face(r, s), lo = fc.a0 + hw + 0.1, hi = fc.a1 - hw - 0.1, n = Math.max(1, Math.floor((hi - lo) / 0.3)), k0 = Math.floor(this.rnd() * (n + 1));
       if (hi < lo) continue;
       for (let i = 0; i <= n; i++) {
-        const [x, z] = point(r, s, o.at ?? lo + (hi - lo) * ((k0 + i) % (n + 1)) / n, back ? back + 0.06 : 0);
+        const [x, z] = point(r, s, o.at !== undefined ? o.at * this.k : lo + (hi - lo) * ((k0 + i) % (n + 1)) / n, back ? back + 0.06 : 0);
         const p: Piece = { t, x, z, y: r.y + (o.y ?? 0), turn: TURN[s], v: o.v, foot: o.foot };
-        if (this.free(footprint(p, true)!, p.y)) { this.L.pieces.push(p); return p; }
+        if (this.free(footprint(p, true)!, p.y)) { this.L.pieces.push(p); return { ...p, x: x / this.k, z: z / this.k }; }
         if (o.at !== undefined) break;
       }
     }
@@ -348,17 +360,19 @@ class Plan {
   }
 
   /** Un posto a sedere su un pezzo: (dx, dz) nel riferimento del pezzo, verso relativo al pezzo. */
-  seat(name: string, p: Piece, dx: number, dz: number, deg: number): void { const [x, z] = local(p, dx, dz); this.spot(name, x, z, p.y, p.turn + deg, true); }
+  seat(name: string, p: Piece, dx: number, dz: number, deg: number): void { const [x, z] = local(p, this.u(dx), this.u(dz)); this.spot(name, x, z, p.y, p.turn + deg, true); }
 }
 
 // ── i modelli ────────────────────────────────────────────────────────────────
 
 /** Casa povera: una stanza sola aperta fino alla paglia, il camino che la divide (dietro, il cantuccio caldo del letto). */
-function povera(P: Plan, hw: number, hd: number): void {
-  const ix = hw - 0.3, iz = hd - 0.3, y = 0.1, dx = -0.4 * hw, D = 0.7 * hw - 0.1, top = 2.7 + iz * 1.2;
-  P.room("stanza", [-ix, -iz, ix, iz], y, 2.7, "terra", "intonaco", 0.3, { foot: 0.8, ridge: "x", rise: iz * 1.2, ties: [-ix * 0.55, 0.1] });
-  P.open("uscio", "stanza", "z+", dx, 1, 1.9);
-  P.open("finestra", "stanza", "z+", 0.45 * hw, 0.8, 0.7, 1.15);
+function povera(P: Plan, hw: number, hd: number, K: number): void {
+  // (nelle case larghe la falda si fa più dolce e il camino non si allunga: lo stesso conto del tetto in town.ts)
+  const ix = hw - 0.3, iz = hd - 0.3, y = 0.1, dx = -0.4 * hw, D = Math.min(0.7 * hw - 0.1, 2.4), rise = Math.min(iz * 1.2, 4.04 * K), top = 2.7 * K + rise;
+  P.room("stanza", [-ix, -iz, ix, iz], y, 2.7 * K, "terra", "intonaco", 0.3, { foot: 0.8 * K, ridge: "x", rise, ties: [-ix * 0.55, 0.1] });
+  P.open("uscio", "stanza", "z+", dx, K, 2 * K - y);
+  P.open("finestra", "stanza", "z+", 0.45 * hw, 0.8 * K, 0.7 * K, 1.25 * K - y, { deep: 0.3 - 0.14 * K });
+  P.open("finestra", "stanza", "z-", 0.3 * hw, 0.8 * K, 0.7 * K, 1.25 * K - y, { deep: 0.3 - 0.14 * K });   // quella sul retro
   P.node("porta.fuori", dx, hd + 1.2, 0, 180); P.node("porta", dx, iz - 0.9, y, 180); P.node("stanza", -0.5, 0.3, y, 90); P.node("fondo", -0.5, -iz + 1.2, y, 180);
   P.link("porta.fuori", "porta", "stanza", "fondo");
   P.put("camino", ix, 0, y, 270, top - y, [-0.55, 0, 0.55, D]);
@@ -373,19 +387,24 @@ function povera(P: Plan, hw: number, hd: number): void {
   P.put("candela", tb.x - 0.1, tb.z + 0.05, y + 0.72, 0); P.put(P.pick<PieceId>("ciotola", "boccale", "brocca"), tb.x + 0.2, tb.z - 0.1, y + 0.72, 0);
   for (const t of P.mix<PieceId>("forziere", "scaffale", "botte", "sacco", "sacco", "legna").slice(0, 4 + Math.floor(P.rnd() * 2))) P.wall(t, "stanza", P.mix<Side>("x-", "z-", "z+", "x+"), { v: 2 });
   P.put(P.pick<PieceId>("cesta", "secchio"), ix - D - 0.3, 0.95, y, 0);
+  if (K > 1) for (const t of P.mix<PieceId>("panca", "botte", "sacco", "scaffale", "armadio", "legna", "forziere")) P.wall(t, "stanza", P.mix<Side>("x-", "z-", "z+", "x+"), { v: 2 });   // più spazio, più roba
 }
 
 /** Casa a graticcio: la bottega di pietra a terra (focolare sul fondo, la tavola, il banco sotto la finestra), di sopra una camera sola; la scala lungo il muro di destra. */
-function graticcio(P: Plan, hw: number, hd: number): void {
-  const ix = hw - 0.4, iz = hd - 0.4, jx = hw - 0.2, zb = -hd + 0.25, zf = hd + 0.1, Y0 = 0.12, Y1 = 3.27, dx = -0.48 * hw, cx = -0.5 * hw + 0.35, run = 4.35, sx = ix - 1.5;   // (la scala è larga un metro e mezzo: in due ci si incrocia)
-  P.room("bottega", [-ix, -iz, ix, iz], Y0, 2.83, "cotto", "pietra", 0.4, { beams: "x" });
-  P.room("camera", [-jx, zb, jx, zf], Y1, 2.63, "assi", "intonaco", 0.25, { beams: "x" });
-  P.open("uscio", "bottega", "z+", dx, 1.15, 1.98, 0, { arch: true });
-  P.open("finestra", "bottega", "z+", 0.4 * hw, 1.7, 1.25, 0.83);
-  for (const s of [-1, 1]) P.open("finestra", "camera", "z+", s * 0.38 * hw, 0.95, 1.25, 0.83);
+function graticcio(P: Plan, hw: number, hd: number, K: number): void {
+  const ix = hw - 0.4, iz = hd - 0.4, jx = hw - 0.2, zb = -hd + 0.25, zf = hd + 0.35 * K - 0.3, Y0 = 0.12, Y1 = 3.27 * K, dx = -0.48 * hw, cx = -0.5 * hw + 0.35, run = 4.35 * K, sx = ix - 1.5;
+  const H0 = Y1 - Y0 - 0.32, H1 = 2.7 * K - 0.07;   // le altezze delle due stanze: seguono quelle del guscio   // (la scala è larga un metro e mezzo: in due ci si incrocia)
+  P.room("bottega", [-ix, -iz, ix, iz], Y0, H0, "cotto", "pietra", 0.4, { beams: "x" });
+  P.room("camera", [-jx, zb, jx, zf], Y1, H1, "assi", "intonaco", 0.25, { beams: "x" });
+  P.open("uscio", "bottega", "z+", dx, 1.15 * K, 2.1 * K - Y0, 0, { arch: true });
+  P.open("finestra", "bottega", "z+", 0.4 * hw, 1.7 * K, 1.25 * K, 0.95 * K - Y0, { deep: 0.4 - 0.08 * K });
+  for (const s of [-1, 1]) P.open("finestra", "camera", "z+", s * 0.38 * hw, 0.95 * K, 1.25 * K, 0.85 * K - 0.02, { deep: 0.3 - 0.08 * K });
+  // (le finestre dei fianchi e del retro: una per parete, al centro, come le mostra la casa da fuori)
+  for (const s of ["x-", "x+"] as Side[]) P.open("finestra", "camera", s, 0.175 * K, 0.95 * K, 1.25 * K, 0.85 * K - 0.02, { deep: 0.2 - 0.03 * K });
+  P.open("finestra", "camera", "z-", 0, 0.95 * K, 1.25 * K, 0.85 * K - 0.02, { deep: 0.25 - 0.08 * K });
   // la scala sale verso il fondo (e si arriva dietro) o verso la strada (e si arriva sotto le finestre)
   const back = P.rnd() < 0.5, zt = back ? zb + 1.15 : -iz + 1.1 + run, z0 = back ? zt + run : -iz + 1.1, e = back ? 1 : -1;
-  P.stair([sx, Math.min(zt, z0), ix, Math.max(zt, z0)], back ? "z-" : "z+", Y0, Y1, 16, true, 3.5);
+  P.stair([sx, Math.min(zt, z0), ix, Math.max(zt, z0)], back ? "z-" : "z+", Y0, Y1, Math.round(16 * K), true, 3.5 * K);
   P.node("porta.fuori", dx, hd + 1.3, 0, 180); P.node("porta", dx, iz - 0.9, Y0, 180); P.node("sala", dx + 0.3, 0.9, Y0, 180); P.node("fondo", dx + 0.3, -iz + 1.85, Y0, 180);
   P.node("scala", ix - 0.75, z0 + (back ? 0.43 : -0.55), Y0, back ? 180 : 0); P.node("scala.cima", ix - 0.75, zt - e * 0.5, Y1, back ? 180 : 0);
   P.node("pianerottolo", sx - 0.7, zt - e * 0.55, Y1, 270); P.node("camera", 0.3, back ? 0 : 1.2, Y1, 0);
@@ -393,8 +412,8 @@ function graticcio(P: Plan, hw: number, hd: number): void {
   // (con la scala larga, dal fondo non ci si arriva più dritti: si passa davanti al piede, rasente al muro di fondo)
   if (!back) { P.node("scala.piede", sx - 0.55, -iz + 0.6, Y0, 90); P.link("fondo", "scala.piede", "scala"); }
   P.link(...(back ? ["porta"] : []), "scala", "scala.cima", "pianerottolo", "camera");
-  P.put("focolare", cx, -iz, Y0, 0, 2.83); P.spot("focolare", cx, -iz + 1.65, Y0, 180); P.put("paiolo", cx, -iz + 0.45, Y0, 0);
-  const tb = P.put("tavolo", sx - 1.15, -0.3, Y0, 90);
+  P.put("focolare", cx, -iz, Y0, 0, H0); P.spot("focolare", cx, -iz + 1.65, Y0, 180); P.put("paiolo", cx, -iz + 0.45, Y0, 0);
+  const tb = K > 1 ? P.put("tavolo", 1.5, -iz + 3.6, Y0, 90) : P.put("tavolo", sx - 1.15, -0.3, Y0, 90);   // (nella bottega grande la tavola sta verso il fondo: fra porta e scala si passa)
   P.seat("tavolo.1", tb, 0.45, -0.62, 0); P.seat("tavolo.2", tb, -0.45, -0.62, 0);
   P.put("candela", tb.x, tb.z + 0.2, Y0 + 0.76, 0); P.put("brocca", tb.x + 0.1, tb.z - 0.4, Y0 + 0.76, 0); P.put("boccale", tb.x - 0.15, tb.z - 0.65, Y0 + 0.76, 0); P.put("ciotola", tb.x + 0.12, tb.z + 0.6, Y0 + 0.76, 0);
   if (!back) {   // sotto la finestra, il banco di chi vende
@@ -402,10 +421,10 @@ function graticcio(P: Plan, hw: number, hd: number): void {
     P.spot("banco", b.x, b.z - 0.85, Y0, 0); P.put("ciotola", b.x - 0.4, b.z, Y0 + 1.05, 0); P.put("brocca", b.x + 0.35, b.z + 0.05, Y0 + 1.05, 0);
   }
   P.wall("legna", "bottega", ["z-"], { at: cx + 1.75 });
-  for (const t of P.mix<PieceId>("scaffale", "forziere", "botte", "botte", "sacco", "armadio", "panca").slice(0, 3)) P.wall(t, "bottega", P.mix<Side>("x-", "z-", "z+"), { v: P.pick(0, 2) });
+  for (const t of P.mix<PieceId>("scaffale", "forziere", "botte", "botte", "sacco", "armadio", "panca").slice(0, K > 1 ? 7 : 3)) P.wall(t, "bottega", P.mix<Side>("x-", "z-", "z+"), { v: P.pick(0, 2) });
   P.wall("candela.muro", "bottega", ["x-"], { y: 1.7, at: 0.6 }); P.put("cesta", cx + 1.15, -iz + 1.25, Y0, 0);
   // di sopra: la canna del camino, il letto grande con la testa al muro, il resto dove capita
-  P.put("canna", cx, zb, Y1, 0, 2.63);
+  P.put("canna", cx, zb, Y1, 0, H1);
   const bz = back ? zf - 1.5 : zb + 2.6, bed = P.put("lettone", -jx + 1.12, bz, Y1, 270);
   P.spot("letto", bed.x, bed.z, Y1, 90, true);
   // un nodo accanto al letto: senza, il nodo più vicino potrebbe essere quello della casa accanto, oltre il muro
@@ -413,52 +432,133 @@ function graticcio(P: Plan, hw: number, hd: number): void {
   P.wall("forziere", "camera", ["x-"], { at: bz + (back ? -1.5 : 1.5) });
   const tv = P.wall("tavolino", "camera", P.mix<Side>("z+", "z-", "x-"));
   if (tv) { P.put("candela", tv.x, tv.z, Y1 + 0.72, 0); const s = local(tv, 0, 0.62); P.put("sgabello", s[0], s[1], Y1, 0); }
-  for (const t of P.mix<PieceId>("armadio", "scaffale", "forziere", "letto", "sacco").slice(0, 3)) P.wall(t, "camera", P.mix<Side>("x-", "z-", "z+"), { v: 2 });
+  for (const t of P.mix<PieceId>("armadio", "scaffale", "forziere", "letto", "sacco").slice(0, K > 1 ? 5 : 3)) P.wall(t, "camera", P.mix<Side>("x-", "z-", "z+"), { v: 2 });
   P.wall("candela.muro", "camera", ["x+"], { y: 1.7, at: zt - e * 0.6 });
+  if (K > 1) {   // più spazio, più roba: lungo i muri della bottega e della camera
+    for (const t of P.mix<PieceId>("botte", "sacco", "scaffale", "panca", "forziere", "botte", "sacco")) P.wall(t, "bottega", P.mix<Side>("x-", "z-", "z+"), { v: 0 });
+    for (const t of P.mix<PieceId>("armadio", "scaffale", "panca", "forziere", "sacco")) P.wall(t, "camera", P.mix<Side>("x-", "z-", "z+", "x+"), { v: 2 });
+    P.wall("candela.muro", "bottega", ["x-"], { y: 1.7, at: -iz + 2.4 }); P.wall("candela.muro", "camera", ["x-"], { y: 1.7, at: 0.5 });
+  }
 }
 
 /** Casa del ricco: la sala coi due focolari e la tavola lunga, la scala lungo il muro di fondo; di sopra il corridoio, la camera padronale e lo studio. `m` la specchia. */
-function ricca(P: Plan, hw: number, hd: number): void {
-  const ix = hw - 0.4, iz = hd - 0.4, Y0 = 0.12, Y1 = 3.52, m = P.rnd() < 0.5 ? -1 : 1, T = (deg: number): number => (m > 0 ? deg : 360 - deg);
-  const top = m * (ix - 1.1), foot = top - m * 4.8, zs = -iz + 1.7, xp = m * 1.2;
-  P.room("sala", [-ix, -iz, ix, iz], Y0, 3.3, "cotto", "pietra", 0.4, { beams: "z" });
-  P.room("corridoio", [-ix, -iz, ix, -1.1], Y1, 2.97, "assi", "intonaco", 0.4, { beams: "z" });
-  const cam: Rect = m > 0 ? [-ix, -0.8, xp - 0.15, iz] : [xp + 0.15, -0.8, ix, iz], stu: Rect = m > 0 ? [xp + 0.15, -0.8, ix, iz] : [-ix, -0.8, xp - 0.15, iz];
-  P.room("camera", cam, Y1, 2.97, "assi", "intonaco", 0.4, { beams: "z" }); P.room("studio", stu, Y1, 2.97, "assi", "intonaco", 0.4, { beams: "z" });
-  P.open("uscio", "sala", "z+", 0, 1.7, 2.38, 0, { arch: true });
-  for (const s of [-1, 1]) P.open("finestra", "sala", "z+", s * 0.66 * hw, 0.9, 1.4, 0.98);
-  P.open("finestra", "camera", "z+", 0, 1, 1.9, 0.68); P.open("finestra", "camera", "z+", -m * 0.6 * hw, 1, 1.9, 0.68); P.open("finestra", "studio", "z+", m * 0.6 * hw, 1, 1.9, 0.68);
+function ricca(P: Plan, hw: number, hd: number, K: number): void {
+  const ix = hw - 0.4, iz = hd - 0.4, Y0 = 0.12, Y1 = 3.52 * K, H0 = Y1 - Y0 - 0.1, H1 = 2.97 * K, m = P.rnd() < 0.5 ? -1 : 1, T = (deg: number): number => (m > 0 ? deg : 360 - deg);
+  const top = m * (ix - 1.1), foot = top - m * 4.8 * K, zs = -iz + 1.7, xp = m * 1.2;
+  // (il corridoio di sopra è profondo tre metri dal muro di fondo, le stanze prendono il resto: con la casa cresce la stanza, non il corridoio)
+  const zc = -iz + 3, zr = zc + 0.3, big = hw > 6, tz = big ? -iz + 5.4 : -1.25;
+  P.room("sala", [-ix, -iz, ix, iz], Y0, H0, "cotto", "pietra", 0.4, { beams: "z" });
+  P.room("corridoio", [-ix, -iz, ix, zc], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" });
+  const cam: Rect = m > 0 ? [-ix, zr, xp - 0.15, iz] : [xp + 0.15, zr, ix, iz], stu: Rect = m > 0 ? [xp + 0.15, zr, ix, iz] : [-ix, zr, xp - 0.15, iz];
+  P.room("camera", cam, Y1, H1, "assi", "intonaco", 0.4, { beams: "z" }); P.room("studio", stu, Y1, H1, "assi", "intonaco", 0.4, { beams: "z" });
+  P.open("uscio", "sala", "z+", 0, 1.7 * K, 2.5 * K - Y0, 0, { arch: true });
+  // (le finestre sono a sesto acuto come i vani della facciata, e aperte: da dentro si vede la strada)
+  const fs = { arch: true, deep: 0.4 - 0.08 * K }, fn = { arch: true, deep: 0.4 - 0.09 * K };
+  for (const s of [-1, 1]) P.open("finestra", "sala", "z+", s * 0.66 * hw, 0.9 * K, 1.4 * K, 1.1 * K - Y0, fs);
+  P.open("finestra", "camera", "z+", 0, K, 1.9 * K, 0.68 * K, fn); P.open("finestra", "camera", "z+", -m * 0.6 * hw, K, 1.9 * K, 0.68 * K, fn); P.open("finestra", "studio", "z+", m * 0.6 * hw, K, 1.9 * K, 0.68 * K, fn);
+  for (const s of [-1, 1]) P.open("finestra", "corridoio", "z-", s * 0.5 * hw, K, 1.9 * K, 0.68 * K, fn);
+  P.open("finestra", m > 0 ? "camera" : "studio", "x-", 0, K, 1.9 * K, 0.68 * K, fn); P.open("finestra", m > 0 ? "studio" : "camera", "x+", 0, K, 1.9 * K, 0.68 * K, fn);
   const xc = -m * 1.5, xs = m * (ix - 1.2);
   P.open("porta", "corridoio", "z+", xc, 1.2, 2.15, 0, { to: "camera" }); P.open("porta", "corridoio", "z+", xs, 1.1, 2.15, 0, { to: "studio" });
-  P.stair([Math.min(foot, top), -iz, Math.max(foot, top), zs], m > 0 ? "x+" : "x-", Y0, Y1, 17, true, 3.5);
-  P.node("porta.fuori", 0, hd + 1.3, 0, 180); P.node("porta", 0, iz - 0.9, Y0, 180); P.node("sala", 0, 1.5, Y0, 180); P.node("sala.lato", -m * 2.2, 1.3, Y0, 180);
-  P.node("sala.fondo", -m * 2.2, -1.3, Y0, 180); P.node("scala.piede", foot - m * 0.75, -2.0, Y0, 180); P.node("scala", foot - m * 0.6, -iz + 0.85, Y0, T(90)); P.node("sala.tavola", m * 0.5, 0.7, Y0, 180);
-  P.node("scala.cima", top + m * 0.55, -iz + 0.85, Y1, 0); P.node("pianerottolo", top + m * 0.55, -1.75, Y1, T(270)); P.node("studio.porta", xs, -1.75, Y1, 0);
-  P.node("corridoio", 0, -1.75, Y1, 180); P.node("camera.porta", xc, -1.75, Y1, 0); P.node("camera", xc, 0.3, Y1, 0); P.node("studio", xs - m * 0.55, 1.5, Y1, 0);
+  P.stair([Math.min(foot, top), -iz, Math.max(foot, top), zs], m > 0 ? "x+" : "x-", Y0, Y1, Math.round(17 * K), true, 3.5 * K);
+  P.node("porta.fuori", 0, hd + 1.3, 0, 180); P.node("porta", 0, iz - 0.9, Y0, 180); P.node("sala", 0, iz - 2.6, Y0, 180); P.node("sala.lato", -m * (ix - 1.4), iz - 2.8, Y0, 180);
+  P.node("sala.fondo", -m * (ix - 1.4), -iz + 2.8, Y0, 180); P.node("scala.piede", foot - m * 0.75, -iz + 2.1, Y0, 180); P.node("scala", foot - m * 0.6, -iz + 0.85, Y0, T(90)); P.node("sala.tavola", m * 0.5, tz + 1.95, Y0, 180);
+  P.node("scala.cima", top + m * 0.55, -iz + 0.85, Y1, 0); P.node("pianerottolo", top + m * 0.55, zc - 0.65, Y1, T(270)); P.node("studio.porta", xs, zc - 0.65, Y1, 0);
+  P.node("corridoio", 0, zc - 0.65, Y1, 180); P.node("camera.porta", xc, zc - 0.65, Y1, 0); P.node("camera", xc, zc + 1.4, Y1, 0); P.node("studio", xs - m * 0.55, zc + 2.6, Y1, 0);
   P.link("porta.fuori", "porta", "sala", "sala.lato", "sala.fondo", "scala.piede", "scala", "scala.cima", "pianerottolo", "studio.porta", "corridoio", "camera.porta", "camera"); P.link("studio.porta", "studio"); P.link("sala", "sala.tavola");
   // la sala: un focolare per muro di fianco (sotto i due comignoli), quello di destra per chi cucina
-  P.put("focolare", -ix, 0, Y0, 90, 3.3); P.put("focolare", ix, 0, Y0, 270, 3.3); P.put("paiolo", m * (ix - 0.45), 0, Y0, 0);
+  P.put("focolare", -ix, 0, Y0, 90, H0); P.put("focolare", ix, 0, Y0, 270, H0); P.put("paiolo", m * (ix - 0.45), 0, Y0, 0);
   P.spot("focolare", -m * (ix - 1.7), 0.5, Y0, T(270)); P.spot("cucina", m * (ix - 1.7), 0.5, Y0, T(90));
-  const tb = P.put("tavolone", m * 0.5, -1.25, Y0, 0);
+  const tb = P.put("tavolone", m * 0.5, tz, Y0, 0);
   for (const [i, x] of [-1.1, 0, 1.1].entries()) { const a = P.put("scranno", tb.x + x, tb.z + 0.9, Y0, 180); P.spot(`tavola.${i + 1}`, a.x, a.z, Y0, 180, true); }   // (dietro la tavola ora passa la scala: si siede solo da questa parte)
-  P.put("candelabro", tb.x, tb.z, Y0 + 2.25, 0);
+  P.put("candelabro", tb.x, tb.z, Y0 + H0 - 1.05, 0);
   P.put("candela", tb.x - 0.9, tb.z, Y0 + 0.78, 0); P.put("candela", tb.x + 0.9, tb.z, Y0 + 0.78, 0); P.put("brocca", tb.x + 0.3, tb.z + 0.15, Y0 + 0.78, 0);
   for (const x of [-0.5, 0.1, 1.3]) P.put("boccale", tb.x + x, tb.z - 0.2, Y0 + 0.78, 0);
   P.put("ciotola", tb.x - 1.3, tb.z + 0.2, Y0 + 0.78, 0);
   for (const t of P.mix<PieceId>("scaffale", "scaffale", "armadio", "forziere", "botte", "botte", "panca", "legna")) P.wall(t, "sala", P.mix<Side>("x-", "x+", "z+"), { v: P.pick(0, 2) });
   for (const s of [-1, 1]) P.wall("candela.muro", "sala", ["z+"], { y: 1.8, at: s * 1.55 });
   // di sopra: le due canne attraversano camera e studio
-  P.put("canna", -ix, 0, Y1, 90, 2.97); P.put("canna", ix, 0, Y1, 270, 2.97);
-  const bed = P.put("lettone", -m * (ix - 1.12), 2.6, Y1, T(270)); P.spot("camera.letto", bed.x, bed.z, Y1, T(90), true);
+  P.put("canna", -ix, 0, Y1, 90, H1); P.put("canna", ix, 0, Y1, 270, H1);
+  const bed = P.put("lettone", -m * (ix - 1.12), zc + 3.7, Y1, T(270)); P.spot("camera.letto", bed.x, bed.z, Y1, T(90), true);
   P.node("camera.letto.fianco", bed.x + m * 0.3, bed.z - 1.35, Y1, 0); P.link("camera", "camera.letto.fianco");
   P.put("forziere", bed.x + m * 1.45, bed.z, Y1, T(270));
-  const tv = P.wall("tavolino", "camera", [m > 0 ? "x+" : "x-"], { at: 1.6 });
+  const tv = P.wall("tavolino", "camera", [m > 0 ? "x+" : "x-"], { at: zc + 2.7 });
   if (tv) { P.put("candela", tv.x, tv.z, Y1 + 0.72, 0); P.put("libri", tv.x, tv.z + 0.2, Y1 + 0.72, 0); const s = local(tv, 0, 0.62); P.put("scranno", s[0], s[1], Y1, tv.turn + 180); }
   for (const t of P.mix<PieceId>("armadio", "forziere", "scaffale")) P.wall(t, "camera", P.mix<Side>("z-", m > 0 ? "x+" : "x-"), { v: 1 });
   const ds = P.put("scrittoio", xs + m * 0.1, iz - 1, Y1, 180), ch = P.put("scranno", ds.x, ds.z - 0.72, Y1, 0);
   P.spot("studio.scrittoio", ch.x, ch.z, Y1, 0, true); P.put("candela", ds.x - 0.4, ds.z + 0.1, Y1 + 0.82, 0); P.put("libri", ds.x + 0.35, ds.z + 0.1, Y1 + 0.82, 0);
   for (const t of ["scaffale", "scaffale", "forziere"] as PieceId[]) P.wall(t, "studio", P.mix<Side>(m > 0 ? "x-" : "x+", "z-"), { v: 1 });
   for (const x of [-2, 1.6]) P.wall("candela.muro", "corridoio", ["z+"], { y: 1.75, at: x * m });
+  if (K > 1) {   // più spazio, più roba: gli scranni anche dietro la tavola, e lungo i muri di ogni stanza
+    for (const x of [-1.1, 0, 1.1]) P.put("scranno", tb.x + x, tb.z - 0.9, Y0, 0);
+    for (const t of P.mix<PieceId>("panca", "scaffale", "botte", "sacco", "forziere", "armadio", "panca")) P.wall(t, "sala", P.mix<Side>("x-", "x+", "z+"), { v: P.pick(0, 2) });
+    for (const r of ["camera", "studio", "corridoio"]) for (const t of P.mix<PieceId>("panca", "scaffale", "armadio", "forziere").slice(0, 3)) P.wall(t, r, P.mix<Side>("x-", "x+", "z-", "z+"), { v: 1 });
+  }
+}
+
+/**
+ * Locanda (nel guscio di una casa del ricco, alla misura di disegno 9 × 9: la ingrandisce `P.k`): la sala col focolare a
+ * sinistra, il bancone e la cucina a destra, i tavoli, la scala lungo il muro di fondo; di sopra il corridoio e tre camere.
+ * I nomi dei posti sono quelli che usa il file (oste, sgabelli, botti, cucina, tavoli, letti, forzieri).
+ */
+function locanda(P: Plan, K: number): void {
+  const IW = 4.1, Y0 = 0.12, Y1 = 3.52 * K, H0 = Y1 - Y0 - 0.1, H1 = 2.97 * K, u = (v: number): number => P.u(v), zc = -0.9, bx = 2;
+  const CAM: [number, number, number, number][] = [[-IW, -1.4, -2.1, -3.55], [-1.1, 1.1, -0.4, 0.55], [1.4, IW, 2.1, 3.55]];   // le camere: da x a x, la porta, il letto
+  P.room("sala", [-IW, -IW, IW, IW], Y0, H0, "cotto", "pietra", 0.4, { beams: "z" });
+  P.room("corridoio", [-IW, -IW, IW, -1.6], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" });
+  CAM.forEach(([x0, x1], i) => P.room(`camera${i + 1}`, [x0, -1.3, x1, IW], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" }));
+  P.open("uscio", "sala", "z+", 0, 1.7, 2.5 * K - Y0, 0, { arch: true });
+  for (const s of [-1, 1]) P.open("finestra", "sala", "z+", s * 2.97, 0.9, 1.4 * K, 1.1 * K - Y0, { arch: true, deep: 0.32 * K });
+  for (const s of [-1, 1]) P.open("finestra", "corridoio", "z-", s * 2.25, 1, 1.9 * K, 0.68 * K, { arch: true, deep: 0.31 * K });
+  P.open("finestra", "camera1", "x-", 0, 1, 1.9 * K, 0.68 * K, { arch: true, deep: 0.31 * K }); P.open("finestra", "camera3", "x+", 0, 1, 1.9 * K, 0.68 * K, { arch: true, deep: 0.31 * K });
+  CAM.forEach(([, , door], i) => { P.open("finestra", `camera${i + 1}`, "z+", (i - 1) * 2.7, 1, 1.9 * K, 0.68 * K, { arch: true, deep: 0.31 * K }); P.open("porta", "corridoio", "z+", door, 1.2, 2.15, 0, { to: `camera${i + 1}` }); });
+  P.stair([-2, -IW, 2.8, -2.9], "x+", Y0, Y1, Math.round(17 * K), true, 3.5 * K);
+  // i nodi (nome, x, z, quota, verso) e i percorsi
+  const N: [string, number, number, number, number][] = [
+    ["porta.fuori", 0, 4.5 + u(1.3), 0, 180], ["porta", 0, IW - u(1.5), Y0, 180], ["sala", -0.5, 1.2, Y0, 180], ["sala.fondo", -2.5, -2.2, Y0, 180], ["scala", -2 - u(0.5), -3.5, Y0, 90],
+    ["bancone", bx - u(1.3), zc + u(-1), Y0, 90], ["focolare.davanti", -IW + u(2.7), 0, Y0, 270], ["bancone.varco", 2.9, 1.8, Y0, 180], ["cucina", IW - u(1.7), 0, Y0, 90], ["bancone.dietro", bx + u(0.8), zc + u(-0.5), Y0, 270],
+    ["scala.cima", 2.8 + u(0.65), -3.5, Y1, 0], ["pianerottolo", 2.8 + u(0.65), -2.25, Y1, 270], ["camera3.porta", 2.1, -2.25, Y1, 0], ["corridoio", 0.6, -2.3, Y1, 180],
+    ["camera2.porta", -0.4, -2.25, Y1, 0], ["camera1.porta", -2.1, -2.25, Y1, 0], ["camera1", -2.2, 2.3, Y1, 0], ["camera2", -0.45, 2.3, Y1, 0], ["camera3", 2.2, 2.3, Y1, 0],
+  ];
+  for (const [name, x, z, y, deg] of N) P.node(name, x, z, y, deg);
+  P.link("porta.fuori", "porta", "sala", "sala.fondo", "scala", "scala.cima", "pianerottolo", "camera3.porta", "corridoio", "camera2.porta", "camera1.porta", "camera1");
+  P.link("sala", "bancone"); P.link("sala", "focolare.davanti"); P.link("sala", "bancone.varco", "cucina", "bancone.dietro"); P.link("camera2.porta", "camera2"); P.link("camera3.porta", "camera3");
+  // il focolare della sala, coi suoi due sgabelli e la legna
+  P.put("focolare", -IW, 0, Y0, 90, H0); P.spot("focolare", -IW + u(1.75), 0, Y0, 270);
+  [-1, 1].forEach((s, i) => { const g = P.put("sgabello", -IW + u(1.65), s * u(1.05), Y0, 0); P.spot(`focolare.sgabello${i + 1}`, g.x, g.z, Y0, s < 0 ? 310 : 230, true); });
+  P.wall("legna", "sala", ["x-"], { at: -2.1 });
+  // il bancone: tre banchi in fila col fronte verso la sala; davanti gli sgabelli, dietro l'oste, le botti contro il muro, la cucina
+  for (const d of [-1.7, 0, 1.7]) P.put("banco", bx, zc + u(d), Y0, 270);
+  [-1.4, -0.6].forEach((d, i) => { const g = P.put("sgabello", bx - u(0.65), zc + u(d), Y0, 0); P.spot(`bancone.sgabello${i + 1}`, g.x, g.z, Y0, 90, true); });
+  P.spot("bancone.oste", bx + u(0.75), zc, Y0, 270); P.spot("botti", bx + u(0.85), zc + u(-1.0), Y0, 90);
+  for (const d of [-1.45, -0.6]) P.wall("botte", "sala", ["x+"], { at: zc + u(d) });
+  P.put("candela", bx, zc + u(-1.6), Y0 + 1.05, 0); P.put("candela", bx, zc + u(1.5), Y0 + 1.05, 0); P.put("brocca", bx + u(0.05), zc, Y0 + 1.05, 0);
+  for (const d of [-1.2, -0.3, 1.15]) P.put("boccale", bx - u(0.1), zc + u(d), Y0 + 1.05, 0);
+  P.put("focolare", IW, 0, Y0, 270, H0); P.put("paiolo", IW - u(0.45), 0, Y0, 0);
+  P.wall("scaffale", "sala", ["x+"], { v: 0, at: 2.2 });
+  // i tavoli (ognuno con le sue due panche: quattro posti) e il candelabro
+  const T: [number, number][] = [[-0.5, -1.8], [-3, 3.3], [3, 3.3], [1.3, 2.85]];
+  T.forEach(([x, z], i) => {
+    const tb = P.put("tavolo", x, z, Y0, 0);
+    // (ai due tavoli contro il muro di facciata ci si siede solo dal lato della sala: dall'altro non ci si arriva senza scavalcarli)
+    [-1, 1].forEach((b, j) => { if (b < 0 || (i !== 1 && i !== 2)) [-1, 1].forEach((a, k) => P.seat(`tavolo${i + 1}.${j * 2 + k + 1}`, tb, a * 0.45, b * 0.62, b < 0 ? 0 : 180)); });
+    P.put("candela", x + u(0.3), z, Y0 + 0.76, 0); P.put("boccale", x - u(0.3), z + u(0.1), Y0 + 0.76, 0); P.put("ciotola", x - u(0.55), z - u(0.12), Y0 + 0.76, 0);
+  });
+  P.put("candelabro", -0.5, 1.2, Y0 + H0 - 1.05, 0);
+  for (const s of [-1, 1]) P.wall("candela.muro", "sala", ["z+"], { y: 1.9, at: s * 1.45 });
+  for (const t of P.mix<PieceId>("botte", "sacco", "panca", "forziere", "botte")) P.wall(t, "sala", P.mix<Side>("z+", "x-"));
+  // di sopra: le due canne, e in ogni camera il letto con la testa al muro, il forziere ai piedi, lo sgabello con la candela
+  P.put("canna", -IW, 0, Y1, 90, H1); P.put("canna", IW, 0, Y1, 270, H1);
+  CAM.forEach(([, , , bed], i) => {
+    const n = i + 1, zb = IW - u(1.06), b = P.put("letto", bed, zb, Y1, 0);
+    P.spot(`camera${n}.letto`, b.x, b.z, Y1, 180, true);
+    P.node(`camera${n}.letto.fianco`, bed + (i ? -1 : 1) * u(0.95), zb + u(0.25), Y1, i ? 90 : 270); P.link(`camera${n}`, `camera${n}.letto.fianco`);   // (accanto al letto: da lì ci si corica)
+    P.put("forziere", bed, zb - u(1.35), Y1, 0); P.spot(`camera${n}.forziere`, bed, zb - u(2), Y1, 0);
+    const st = P.put("sgabello", bed + (i ? -1 : 1) * u(0.8), IW - u(0.35), Y1, 0); P.put("candela", st.x, st.z, Y1 + 0.42, 0);
+    for (const t of P.mix<PieceId>("armadio", "tavolino", "scaffale").slice(0, 2)) P.wall(t, `camera${n}`, P.mix<Side>("x-", "x+", "z-"), { v: 2 });
+  });
+  P.wall("scaffale", "corridoio", ["z-"], { v: 2, at: -3 }); P.wall("forziere", "corridoio", ["x-"], { at: -3.3 }); P.spot("ripostiglio", -2.9, -IW + u(1), Y1, 180);
+  for (const x of [-1.25, 0.85]) P.wall("candela.muro", "corridoio", ["z+"], { y: 1.7, at: x });
 }
 
 /**
@@ -466,25 +566,28 @@ function ricca(P: Plan, hw: number, hd: number): void {
  * ponytail: le torri restano chiuse (le loro porte sono finte) e il rosone da dentro non si vede: il nartece ha il soffitto
  * più in basso. Una galleria sopra il nartece, con la scala in una torre, quando servirà; la cripta è la fase 9.
  */
-function cattedrale(P: Plan): void {
-  const y = 0.45, L = 11.5;
-  P.room("navata", [-5.9, -10.9, 5.9, 4.9], y, 10.4, "lastre", "pietra", 0.6, { ridge: "z", rise: 5.4, ties: [-6, -1.7, 2.6] });
-  P.room("nartece", [-3.1, 5.5, 3.1, 10.6], y, 6.6, "lastre", "pietra", 0.6, { beams: "x" });
-  P.room("abside", [-3.4, -14, 3.4, -11.5], y + 0.15, 6.9, "lastre", "pietra", 0.5, { beams: "x" });
-  P.open("uscio", "nartece", "z+", 0, 3.2, 4.95, 0, { arch: true });
-  P.open("varco", "navata", "z+", 0, 4.6, 6, 0, { to: "nartece", arch: true }); P.open("varco", "abside", "z+", 0, 5.2, 6.6, 0, { to: "navata", arch: true });
-  for (const s of ["x-", "x+"] as Side[]) for (let i = 0; i < 4; i++) P.open("finestra", "navata", s, -L + 3.35 + i * 4.3, 1.15, 4.6, 2.95, { arch: true });
-  for (let i = 0; i < 3; i++) P.L.steps.push({ rect: [-3.4 - i * 0.3, L - 0.3, 3.4 + i * 0.3, L + 0.4 + i * 0.6], y: 0.45 - i * 0.15, t: 0 });
+function cattedrale(P: Plan, K: number): void {
+  // (in pianta è scritta alla misura di disegno: la ingrandisce `P.k`; le altezze sono qui, moltiplicate per K)
+  const y = 0.45 * K, L = 11.5, HN = 11 * K - y - 0.15;
+  P.room("navata", [-5.9, -10.9, 5.9, 4.9], y, HN, "lastre", "pietra", 0.6, { ridge: "z", rise: 5.4 * K, ties: [-6 * K, -1.7 * K, 2.6 * K] });
+  P.room("nartece", [-3.1, 5.5, 3.1, 10.6], y, 6.6 * K, "lastre", "pietra", 0.6, { beams: "x" });
+  P.room("abside", [-3.4, -14, 3.4, -11.5], y + 0.15, 6.9 * K, "lastre", "pietra", 0.5, { beams: "x" });
+  P.open("uscio", "nartece", "z+", 0, 3.2, 5.4 * K - y, 0, { arch: true });
+  P.open("varco", "navata", "z+", 0, 4.6, 6 * K, 0, { to: "nartece", arch: true }); P.open("varco", "abside", "z+", 0, 5.2, 6.6 * K, 0, { to: "navata", arch: true });
+  for (const s of ["x-", "x+"] as Side[]) for (let i = 0; i < 4; i++) P.open("finestra", "navata", s, -L + 3.35 + i * 4.3, 1.15, 4.6 * K, 3.4 * K - y, { arch: true, deep: 0.32 * K });
+  P.open("finestra", "abside", "z-", 0, 1.1, 4.4 * K, 2.4 * K - y - 0.15, { arch: true, deep: 0.32 * K });
+  for (const s of ["x-", "x+"] as Side[]) P.open("finestra", "abside", s, -L - 1.5, 0.9, 4.2 * K, 2.4 * K - y - 0.15, { arch: true, deep: 0.42 * K });
+  for (let i = 0; i < 5; i++) P.L.steps.push({ rect: [(-3.4 - i * 0.18) * K, (L - 0.3) * K, (3.4 + i * 0.18) * K, (L + 0.4 + i * 0.36) * K], y: (0.45 - i * 0.09) * K, t: 0 });
   P.node("porta.fuori", 0, L + 2.6, 0, 180); P.node("porta", 0, 9.3, y, 180); P.node("nartece", 0, 6.8, y, 180); P.node("navata", 0, 3.4, y, 180);
   P.node("navata.fondo", 0, -8.6, y, 180);
   for (const [n, s] of [["nord", 1], ["sud", -1]] as [string, number][]) { P.node(`navatella.${n}`, s * 4.5, 3.4, y, 180); P.node(`navatella.${n}.fondo`, s * 4.5, -8.6, y, 180); P.link("navata", `navatella.${n}`, `navatella.${n}.fondo`, "navata.fondo"); }
   P.link("porta.fuori", "porta", "nartece", "navata");
   P.spot("altare", 0, -11.3, y + 0.15, 180);
-  for (const s of [-1, 1]) for (const z of [-6, -1.7, 2.6]) P.put("pilastro", s * 3, z, y, 0, 10.4);
+  for (const s of [-1, 1]) for (const z of [-6, -1.7, 2.6]) P.put("pilastro", s * 3, z, y, 0, HN);
   P.put("altare", 0, -12.95, y + 0.15, 0);
   for (const s of [-1, 1]) { P.put("candeliere", s * 1.75, -12.6, y + 0.15, 0); P.put("candeliere", s * 3.75, -10.2, y, 0); }
   // sei file di banchi ai lati della corsia: ogni fila ha il suo nodo, e ci si siede dal capo verso la corsia
-  const rows = [1.6, 0.2, -1.2, -2.6, -4, -5.4];
+  const rows = Array.from({ length: 9 }, (_, i) => 1.6 - i * 0.95);   // (nove file: la navata ingrandita ne tiene di più)
   rows.forEach((z, r) => {
     P.node(`navata.${r + 1}`, 0, z, y, 180); P.link(r ? `navata.${r}` : "navata", `navata.${r + 1}`);
     [-1, 1].forEach((s, k) => P.seat(`banco${r + 1}.${k + 1}`, P.put("banco.chiesa", s * 1.6, z, y, 180), s * 0.5, 0.05, 0));
@@ -492,25 +595,27 @@ function cattedrale(P: Plan): void {
   P.link(`navata.${rows.length}`, "navata.fondo");
   P.put("leggio", -2.1, -9.5, y, 0); P.spot("leggio", -2.1, -8.85, y, 180);
   P.put("fonte", -2.1, 8.1, y, 0); P.spot("fonte", -1.1, 8.1, y, 270);
-  for (const z of [-4, 1]) P.put("candelabro", 0, z, y + 5.2, 0, 2);
+  for (const z of [-4, 1]) P.put("candelabro", 0, z, y + 5.2 * K, 0, 2);
   for (const s of ["x-", "x+"] as Side[]) for (const z of [-6, -1.7, 2.6]) P.wall("candela.muro", "navata", [s], { y: 2, at: z });
   for (const s of ["x-", "x+"] as Side[]) { P.wall("panca", "nartece", [s], { at: 6.5 }); P.wall("candela.muro", "nartece", [s], { y: 2, at: 9.2 }); P.wall("stendardo", "abside", [s], { y: 2.2, at: -12.7 }); }
 }
 
 /** Municipio: l'atrio con la scala, l'archivio e l'esattoria a terra; di sopra il corridoio, la sala del consiglio e lo studio. ponytail: la torre dell'orologio resta chiusa, il balcone non si apre. */
-function municipio(P: Plan): void {
-  const Y0 = 0.12, Y1 = 4.5, zs = -2.9;
-  P.room("atrio", [-4.2, -4.9, 4.2, 4.9], Y0, 4.13, "lastre", "pietra", 0.6, { beams: "z" });
-  P.room("archivio", [-10.4, -4.9, -4.5, 4.9], Y0, 4.13, "cotto", "pietra", 0.6, { beams: "z" }); P.room("esattoria", [4.5, -4.9, 10.4, 4.9], Y0, 4.13, "cotto", "pietra", 0.6, { beams: "z" });
-  P.room("corridoio", [-10.5, -5, 10.5, -1.5], Y1, 4.5, "assi", "intonaco", 0.4, { beams: "z" });
-  P.room("consiglio", [-10.5, -1.2, 1.4, 5], Y1, 4.5, "assi", "intonaco", 0.4, { beams: "z" }); P.room("studio", [1.7, -1.2, 10.5, 5], Y1, 4.5, "assi", "intonaco", 0.4, { beams: "z" });
-  P.open("uscio", "atrio", "z+", 0, 2.8, 3.58, 0, { arch: true });
+function municipio(P: Plan, K: number): void {
+  // (in pianta è scritto alla misura di disegno: lo ingrandisce `P.k`; le altezze sono qui, moltiplicate per K)
+  const Y0 = 0.12, Y1 = 4.5 * K, zs = -2.9, H0 = Y1 - Y0 - 0.25, H1 = 4.5 * K, u = (v: number): number => P.u(v);
+  P.room("atrio", [-4.2, -4.9, 4.2, 4.9], Y0, H0, "lastre", "pietra", 0.6, { beams: "z" });
+  P.room("archivio", [-10.4, -4.9, -4.5, 4.9], Y0, H0, "cotto", "pietra", 0.6, { beams: "z" }); P.room("esattoria", [4.5, -4.9, 10.4, 4.9], Y0, H0, "cotto", "pietra", 0.6, { beams: "z" });
+  P.room("corridoio", [-10.5, -5, 10.5, -1.5], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" });
+  P.room("consiglio", [-10.5, -1.2, 1.4, 5], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" }); P.room("studio", [1.7, -1.2, 10.5, 5], Y1, H1, "assi", "intonaco", 0.4, { beams: "z" });
+  P.open("uscio", "atrio", "z+", 0, 2.8, 3.7 * K - Y0, 0, { arch: true });
   P.open("porta", "atrio", "x-", 1.6, 1.2, 2.15, 0, { to: "archivio" }); P.open("porta", "atrio", "x+", 1.6, 1.2, 2.15, 0, { to: "esattoria" });
   P.open("porta", "corridoio", "z+", -4.5, 1.4, 2.3, 0, { to: "consiglio" }); P.open("porta", "corridoio", "z+", 6, 1.2, 2.15, 0, { to: "studio" });
-  for (const x of [-8.4, -4.2]) P.open("finestra", "consiglio", "z+", x, 1.3, 2.7, 1.1, { arch: true });
-  P.open("finestra", "consiglio", "z+", 0, 1.5, 3.3, 0.6, { arch: true });
-  for (const x of [4.2, 8.4]) P.open("finestra", "studio", "z+", x, 1.3, 2.7, 1.1, { arch: true });
-  P.stair([-3, -4.9, 3.09, zs], "x+", Y0, Y1, 22, true, 3.6);
+  for (const x of [-8.4, -4.2]) P.open("finestra", "consiglio", "z+", x, 1.3, 2.7 * K, 1.1 * K, { arch: true, deep: 0.32 * K });
+  P.open("finestra", "consiglio", "z+", 0, 1.5, 3.3 * K, 0.6 * K, { arch: true, deep: 0.32 * K });
+  for (const x of [4.2, 8.4]) P.open("finestra", "studio", "z+", x, 1.3, 2.7 * K, 1.1 * K, { arch: true, deep: 0.32 * K });
+  for (const x of [-8.9, -5.9, 5.9, 8.9]) P.open("finestra", x < 0 ? "archivio" : "esattoria", "z+", x, 1.8, 3 * K, 0.9 * K - Y0, { arch: true, deep: 0.42 * K });
+  P.stair([-3, -4.9, 3.09, zs], "x+", Y0, Y1, Math.round(22 * K), true, 3.6 * K);
   P.node("porta.fuori", 0, 6.9, 0, 180); P.node("porta", 0, 3.8, Y0, 180); P.node("atrio", 0, 1.6, Y0, 180); P.node("atrio.fondo", -3.6, -2.4, Y0, 180); P.node("scala", -3.5, -3.9, Y0, 90);
   P.node("archivio.porta", -3.4, 1.6, Y0, 270); P.node("archivio", -6.2, 1.6, Y0, 270); P.node("esattoria.porta", 3.4, 1.6, Y0, 90); P.node("esattoria", 5.6, 1.6, Y0, 90); P.node("esattoria.varco", 7.4, -1, Y0, 90); P.node("esattoria.dietro", 8.6, 0.9, Y0, 270);
   P.node("scala.cima", 3.65, -3.9, Y1, 0); P.node("pianerottolo", 3.65, -2.2, Y1, 270); P.node("studio.porta", 6, -2.2, Y1, 0); P.node("studio", 6, 0, Y1, 0);
@@ -518,65 +623,68 @@ function municipio(P: Plan): void {
   P.link("porta.fuori", "porta", "atrio", "atrio.fondo", "scala", "scala.cima", "pianerottolo", "studio.porta", "studio"); P.link("pianerottolo", "consiglio.porta", "consiglio");
   P.link("atrio", "archivio.porta", "archivio"); P.link("atrio", "esattoria.porta", "esattoria", "esattoria.varco", "esattoria.dietro");
   // atrio
-  P.put("candelabro", 0, 0.6, Y0 + 2.9, 0);
+  P.put("candelabro", 0, 0.6, Y0 + H0 - 1.23, 0);
   for (const s of ["x-", "x+"] as Side[]) { P.wall("panca", "atrio", [s], { at: -0.4 }); P.wall("stendardo", "atrio", [s], { y: 2.4, at: -0.4 }); P.wall("candela.muro", "atrio", [s], { y: 2, at: 3.6 }); P.wall("candela.muro", "atrio", [s], { y: 2, at: -2.4 }); }
   // archivio: scaffali di carte lungo i muri, lo scrittoio dell'archivista
   for (const z of [-3.6, -2, 3.7]) P.wall("scaffale", "archivio", ["x-"], { v: 1, at: z });
   for (const x of [-9.4, -7.8, -6.2]) P.wall("scaffale", "archivio", ["z-"], { v: 1, at: x });
   for (const x of [-9.3, -7.7]) P.wall("scaffale", "archivio", ["z+"], { v: 1, at: x });
-  const d1 = P.put("scrittoio", -8.4, 1, Y0, 90), c1 = P.put("scranno", d1.x + 0.72, d1.z, Y0, 270);
-  P.spot("archivio.scrittoio", c1.x, c1.z, Y0, 270, true); P.put("candela", d1.x, d1.z - 0.4, Y0 + 0.82, 0); P.put("libri", d1.x, d1.z + 0.3, Y0 + 0.82, 0);
+  const d1 = P.put("scrittoio", -8.4, 1, Y0, 90), c1 = P.put("scranno", d1.x + u(0.72), d1.z, Y0, 270);
+  P.spot("archivio.scrittoio", c1.x, c1.z, Y0, 270, true); P.put("candela", d1.x, d1.z - u(0.4), Y0 + 0.82, 0); P.put("libri", d1.x, d1.z + u(0.3), Y0 + 0.82, 0);
   P.wall("forziere", "archivio", ["x+"], { at: -2.6 }); P.wall("forziere", "archivio", ["x+"], { at: -1.4 }); P.wall("candela.muro", "archivio", ["x+"], { y: 2, at: 3.6 }); P.wall("candela.muro", "archivio", ["x-"], { y: 2, at: 0.6 });
   // esattoria: il banco dove si paga, i forzieri dietro, la rastrelliera delle guardie
-  const b1 = P.put("banco", 7.4, 0.8, Y0, 270), b2 = P.put("banco", 7.4, 2.4, Y0, 270);
-  P.spot("esattoria.banco", b1.x - 0.85, 1.6, Y0, 90); P.spot("esattoria.esattore", b1.x + 0.95, 1.6, Y0, 270);
-  P.put("candela", b1.x, b1.z + 0.3, Y0 + 1.05, 0); P.put("libri", b2.x, b2.z - 0.2, Y0 + 1.05, 0); P.put("scranno", 8.8, 2.6, Y0, 270);
+  const b1 = P.put("banco", 7.4, 1.6 - u(0.85), Y0, 270), b2 = P.put("banco", 7.4, 1.6 + u(0.85), Y0, 270);   // (i due banchi restano accostati)
+  P.spot("esattoria.banco", b1.x - u(0.85), 1.6, Y0, 90); P.spot("esattoria.esattore", b1.x + u(0.95), 1.6, Y0, 270);
+  P.put("candela", b1.x, b1.z + u(0.3), Y0 + 1.05, 0); P.put("libri", b2.x, b2.z - u(0.2), Y0 + 1.05, 0); P.put("scranno", 8.8, 2.6, Y0, 270);
   for (const z of [-0.6, 0.6]) P.wall("forziere", "esattoria", ["x+"], { at: z });
   P.wall("rastrelliera", "esattoria", ["z-"], { at: 6 }); P.wall("scaffale", "esattoria", ["z-"], { v: 1, at: 8.8 }); P.wall("armadio", "esattoria", ["z+"], { at: 9 });
   P.wall("candela.muro", "esattoria", ["x-"], { y: 2, at: 3.6 }); P.wall("candela.muro", "esattoria", ["x+"], { y: 2, at: 3 }); P.wall("panca", "esattoria", ["z+"], { at: 6 });
   // sala del consiglio: due tavole in fila, gli scranni attorno, lo stendardo sul fondo
-  const t1 = P.put("tavolone", -6.3, 1.9, Y1, 0), t2 = P.put("tavolone", -2.7, 1.9, Y1, 0);
-  [t1, t2].forEach((t, k) => [-1.2, 0, 1.2].forEach((x, i) => { const a = P.put("scranno", t.x + x, t.z - 0.9, Y1, 0); P.spot(`consiglio.scranno${k * 3 + i + 1}`, a.x, a.z, Y1, 0, true); P.put("scranno", t.x + x, t.z + 0.9, Y1, 180); }));
-  P.put("scranno", -8.75, 1.9, Y1, 90);
-  for (const t of [t1, t2]) { P.put("candelabro", t.x, t.z, Y1 + 2.9, 0); P.put("candela", t.x - 0.8, t.z, Y1 + 0.78, 0); P.put("libri", t.x + 0.5, t.z + 0.1, Y1 + 0.78, 0); P.put("brocca", t.x + 1.2, t.z - 0.1, Y1 + 0.78, 0); }
+  const t1 = P.put("tavolone", -4.5 - u(1.8), 1.9, Y1, 0), t2 = P.put("tavolone", -4.5 + u(1.8), 1.9, Y1, 0);   // (le due tavole restano in fila, testa a testa)
+  [t1, t2].forEach((t, k) => [-1.2, 0, 1.2].forEach((x, i) => { const a = P.put("scranno", t.x + u(x), t.z - u(0.9), Y1, 0); P.spot(`consiglio.scranno${k * 3 + i + 1}`, a.x, a.z, Y1, 0, true); P.put("scranno", t.x + u(x), t.z + u(0.9), Y1, 180); }));
+  P.put("scranno", t1.x - u(2.45), 1.9, Y1, 90);
+  for (const t of [t1, t2]) { P.put("candelabro", t.x, t.z, Y1 + H1 - 1.6, 0); P.put("candela", t.x - u(0.8), t.z, Y1 + 0.78, 0); P.put("libri", t.x + u(0.5), t.z + u(0.1), Y1 + 0.78, 0); P.put("brocca", t.x + u(1.2), t.z - u(0.1), Y1 + 0.78, 0); }
   P.wall("stendardo", "consiglio", ["x-"], { y: 2.6, at: 1.9 }); P.wall("panca", "consiglio", ["z-"], { at: -8.6 }); P.wall("panca", "consiglio", ["z-"], { at: -1 }); P.wall("forziere", "consiglio", ["x+"], { at: 3.6 });
   for (const x of [-9.4, -6.3, -2.1]) P.wall("candela.muro", "consiglio", ["z-"], { y: 2.1, at: x });
   // studio: lo scrittoio davanti alla finestra, i registri
-  const d2 = P.put("scrittoio", 4.2, 3.6, Y1, 180), c2 = P.put("scranno", d2.x, d2.z - 0.72, Y1, 0);
-  P.spot("studio.scrittoio", c2.x, c2.z, Y1, 0, true); P.put("candela", d2.x - 0.4, d2.z + 0.1, Y1 + 0.82, 0); P.put("libri", d2.x + 0.3, d2.z + 0.1, Y1 + 0.82, 0);
+  const d2 = P.put("scrittoio", 4.2, 3.6, Y1, 180), c2 = P.put("scranno", d2.x, d2.z - u(0.72), Y1, 0);
+  P.spot("studio.scrittoio", c2.x, c2.z, Y1, 0, true); P.put("candela", d2.x - u(0.4), d2.z + u(0.1), Y1 + 0.82, 0); P.put("libri", d2.x + u(0.3), d2.z + u(0.1), Y1 + 0.82, 0);
   for (const z of [0.4, 2, 3.6]) P.wall("scaffale", "studio", ["x+"], { v: 1, at: z });
   P.wall("forziere", "studio", ["x-"], { at: 3.8 }); P.wall("armadio", "studio", ["z-"], { at: 9.3 }); P.wall("panca", "studio", ["z-"], { at: 3.4 }); P.wall("stendardo", "studio", ["x-"], { y: 2.6, at: 1.4 });
-  const tv = P.put("tavolino", 8.3, 3.5, Y1, 0); P.put("scranno", tv.x - 0.75, tv.z, Y1, 90); P.put("brocca", tv.x, tv.z, Y1 + 0.72, 0); P.put("boccale", tv.x - 0.2, tv.z + 0.15, Y1 + 0.72, 0);
+  const tv = P.put("tavolino", 8.3, 3.5, Y1, 0); P.put("scranno", tv.x - u(0.75), tv.z, Y1, 90); P.put("brocca", tv.x, tv.z, Y1 + 0.72, 0); P.put("boccale", tv.x - u(0.2), tv.z + u(0.15), Y1 + 0.72, 0);
   for (const x of [3, 8.5]) P.wall("candela.muro", "studio", ["z-"], { y: 2.1, at: x });
   for (const x of [-7.5, -2.2, 7.8]) P.wall("candela.muro", "corridoio", ["z+"], { y: 2, at: x });
   P.wall("panca", "corridoio", ["z+"], { at: -8 }); P.wall("forziere", "corridoio", ["x-"], { at: -3.4 });
+  if (K > 1) for (const r of ["atrio", "archivio", "esattoria", "consiglio", "studio", "corridoio"]) for (const t of P.mix<PieceId>("panca", "forziere", "scaffale", "armadio", "panca").slice(0, 4)) P.wall(t, r, P.mix<Side>("x-", "x+", "z-", "z+"), { v: 1 });   // più spazio, più roba
 }
 
 /** Porta della città (qui +Z è verso la città): nella torre sud il posto di guardia e due rampe ripide; sopra il fornice, il corpo di guardia con l'argano della saracinesca. */
-function porta(P: Plan): void {
-  const Y0 = 0.12, Ym = 2.71, Y1 = 5.3;
-  P.room("torre", [2.5, -2.3, 4.7, 2.3], Y0, 8.3, "lastre", "pietra", 0.3, { beams: "x" });
-  P.room("guardia", [-4.7, -2.3, 2.2, 2.3], Y1, 3.12, "assi", "pietra", 0.3, { beams: "z" });
-  P.open("uscio", "torre", "z+", 3.6, 1.1, 2.08, 0, { arch: true });
+function porta(P: Plan, K: number): void {
+  // (in pianta è scritta alla misura di disegno: la ingrandisce `P.k`; le altezze sono qui, moltiplicate per K)
+  const Y0 = 0.12, Y1 = 5.3 * K, Ym = (Y0 + Y1) / 2, HG = 3.12 * K, u = (v: number): number => P.u(v), R = (r: Rect): Rect => r.map((v) => v * K) as Rect;
+  P.room("torre", [2.5, -2.3, 4.7, 2.3], Y0, Y1 + HG - Y0 - 0.12, "lastre", "pietra", 0.3, { beams: "x" });
+  P.room("guardia", [-4.7, -2.3, 2.2, 2.3], Y1, HG, "assi", "pietra", 0.3, { beams: "z" });
+  P.open("uscio", "torre", "z+", 3.6, 1.1, 2.2 * K - Y0, 0, { arch: true });
   P.open("varco", "torre", "x-", 1.8, 1, 2.1, Y1 - Y0, { to: "guardia" });
-  P.stair([2.5, -1.3, 3.55, 1.3], "z-", Y0, Ym, 10, true, 9); P.stair([3.65, -1.3, 4.7, 1.3], "z+", Ym, Y1, 10, false, 9);
-  P.L.decks.push({ rect: [2.5, -2.3, 4.7, -1.3], y: Ym, t: 0.15 }, { rect: [2.5, 1.3, 4.7, 2.3], y: Y1, t: 0.15 });
-  P.L.rails.push({ ax: 2.5, az: 1.3, bx: 3.6, bz: 1.3, r: 0.06, y0: Y1 - 0.25, y1: Y1 + 1 });   // l'orlo del pianerottolo di cima sopra la prima rampa
-  P.node("porta.fuori", 3.6, 3.8, 0, 180); P.node("porta", 3.75, 1.8, Y0, 180); P.node("scala", 3.03, 1.75, Y0, 180); P.node("scala.mezzo", 3.03, -1.8, Ym, 90);
-  P.node("scala.mezzo2", 4.17, -1.8, Ym, 0); P.node("scala.cima", 4.17, 1.8, Y1, 270); P.node("varco", 3.05, 1.8, Y1, 270); P.node("guardia.porta", 1.4, 1.8, Y1, 270); P.node("guardia", -0.2, 0.3, Y1, 270); P.node("guardia.fondo", -3.2, 0, Y1, 270);
+  P.stair([2.5, -1.3, 3.55, 1.3], "z-", Y0, Ym, Math.round(10 * K), true, 9 * K); P.stair([3.65, -1.3, 4.7, 1.3], "z+", Ym, Y1, Math.round(10 * K), false, 9 * K);
+  P.L.decks.push({ rect: R([2.5, -2.3, 4.7, -1.3]), y: Ym, t: 0.15 }, { rect: R([2.5, 1.3, 4.7, 2.3]), y: Y1, t: 0.15 });
+  P.L.rails.push({ ax: 2.5 * K, az: 1.3 * K, bx: 3.6 * K, bz: 1.3 * K, r: 0.06, y0: Y1 - 0.25, y1: Y1 + 1 });   // l'orlo del pianerottolo di cima sopra la prima rampa
+  P.node("porta.fuori", 3.6, 3.8, 0, 180); P.node("porta", 3.75, 1.8, Y0, 180); P.node("scala", 3.03, 1.3 + u(0.45), Y0, 180); P.node("scala.mezzo", 3.03, -1.3 - u(0.5), Ym, 90);   // (i nodi a mezzo metro dai capi delle rampe, a qualunque scala)
+  P.node("scala.mezzo2", 4.17, -1.3 - u(0.5), Ym, 0); P.node("scala.cima", 4.17, 1.3 + u(0.5), Y1, 270); P.node("varco", 3.05, 1.8, Y1, 270); P.node("guardia.porta", 1.4, 1.8, Y1, 270); P.node("guardia", -0.2, 0.3, Y1, 270); P.node("guardia.fondo", -3.2, 0, Y1, 270);
   P.link("porta.fuori", "porta", "scala", "scala.mezzo", "scala.mezzo2", "scala.cima", "varco", "guardia.porta", "guardia", "guardia.fondo");
   P.wall("candela.muro", "torre", ["x+"], { y: 1.9, at: 1.9 }); P.wall("candela.muro", "torre", ["z-"], { y: Ym + 1.8, at: 3.6 }); P.wall("candela.muro", "torre", ["x+"], { y: Y1 + 1.7, at: 1.8 });
   P.put("sgabello", 4.3, 0.9, Y0, 0); P.wall("rastrelliera", "torre", ["x+"], { at: -0.3 }); P.put("botte", 4.3, -0.95, Y0, 0);
   // il corpo di guardia
   P.put("braciere", 0.6, -0.4, Y1, 0);
-  P.put("argano", -1, -1.75, Y1, 0); P.spot("guardia.argano", -1, -0.85, Y1, 180);
+  P.put("argano", -1, -2.3 + u(0.55), Y1, 0); P.spot("guardia.argano", -1, -2.3 + u(1.45), Y1, 180);
   const tb = P.put("tavolo", -1.9, 1.5, Y1, 0);
   P.seat("guardia.tavolo.1", tb, 0.45, -0.62, 0); P.seat("guardia.tavolo.2", tb, -0.45, -0.62, 0);
-  P.put("candela", tb.x, tb.z, Y1 + 0.76, 0); P.put("boccale", tb.x + 0.4, tb.z - 0.15, Y1 + 0.76, 0); P.put("boccale", tb.x - 0.5, tb.z + 0.1, Y1 + 0.76, 0); P.put("brocca", tb.x - 0.1, tb.z + 0.15, Y1 + 0.76, 0);
+  P.put("candela", tb.x, tb.z, Y1 + 0.76, 0); P.put("boccale", tb.x + u(0.4), tb.z - u(0.15), Y1 + 0.76, 0); P.put("boccale", tb.x - u(0.5), tb.z + u(0.1), Y1 + 0.76, 0); P.put("brocca", tb.x - u(0.1), tb.z + u(0.15), Y1 + 0.76, 0);
   for (const [i, z] of [-1.25, 1.25].entries()) { const b = P.put("letto", -4.14, z, Y1, i ? 0 : 180); P.spot(`guardia.branda${i + 1}.letto`, b.x, b.z, Y1, b.turn + 180, true); }
   P.wall("rastrelliera", "guardia", ["z-"], { at: 1.3 }); P.wall("rastrelliera", "guardia", ["z-"], { at: -2.75 }); P.wall("forziere", "guardia", ["z+"], { at: 0.2 }); P.wall("botte", "guardia", ["z+"], { at: -0.9 });
   for (const x of [-2.6, 0.9]) P.wall("candela.muro", "guardia", ["z+"], { y: 1.8, at: x });
   P.wall("candela.muro", "guardia", ["z-"], { y: 1.8, at: -1 });
+  if (K > 1) for (const t of P.mix<PieceId>("panca", "botte", "forziere", "sacco", "scaffale")) P.wall(t, "guardia", P.mix<Side>("z-", "z+", "x-"), { v: 2 });
 }
 
 /**
@@ -598,19 +706,24 @@ export const seedOf = (c: { id?: string; seed?: number }): number => c.seed ?? [
 /** I vani di facciata che town.ts deve aprire: l'uscio di ogni tipo (centro, larghezza, altezza dalla strada, se a sesto acuto). */
 export function entry(kind: InteriorKind, w: number): { x: number; w: number; h: number; arch: boolean } {
   return kind === "casa.povera" ? { x: -0.2 * w, w: 1, h: 2, arch: false } : kind === "casa.graticcio" ? { x: -0.24 * w, w: 1.15, h: 2.1, arch: true }
-    : kind === "casa.ricca" ? { x: 0, w: 1.7, h: 2.5, arch: true } : kind === "cattedrale" ? { x: 0, w: 3.2, h: 5.4, arch: true }
+    : kind === "casa.ricca" || kind === "locanda" ? { x: 0, w: 1.7, h: 2.5, arch: true } : kind === "cattedrale" ? { x: 0, w: 3.2, h: 5.4, arch: true }
       : kind === "municipio" ? { x: 0, w: 2.8, h: 3.7, arch: true } : { x: 3.6, w: 1.1, h: 2.2, arch: true };
 }
 
 /** La pianta di un edificio: tipo, ingombro (larghezza e profondità: solo le case lo usano), i numeri a caso del suo seme. */
-export function layout(kind: InteriorKind, w: number, d: number, rnd: () => number): Layout {
+/**
+ * `k` = quanto è ingrandito l'edificio (`children[].scale` nel file), altezze comprese: le case crescono con la loro misura,
+ * gli edifici a misura fissa con la scala della pianta (`Plan.k`); gli arredi restano a misura d'uomo.
+ */
+export function layout(kind: InteriorKind, w: number, d: number, rnd: () => number, k = 1): Layout {
   const P = new Plan(kind, kind.startsWith("casa.") ? 0.5 : kind === "porta" ? 0.6 : 0.9, rnd);
-  if (kind === "casa.povera") povera(P, w / 2, d / 2);
-  else if (kind === "casa.graticcio") graticcio(P, w / 2, d / 2);
-  else if (kind === "casa.ricca") ricca(P, w / 2, d / 2);
-  else if (kind === "cattedrale") cattedrale(P);
-  else if (kind === "municipio") municipio(P);
-  else if (kind === "porta") porta(P);
-  else fucina(P);
+  if (kind === "casa.povera") povera(P, w * k / 2, d * k / 2, k);
+  else if (kind === "casa.graticcio") graticcio(P, w * k / 2, d * k / 2, k);
+  else if (kind === "casa.ricca") ricca(P, w * k / 2, d * k / 2, k);
+  else if (kind === "fucina") fucina(P);
+  else {
+    P.k = k;
+    if (kind === "cattedrale") cattedrale(P, k); else if (kind === "municipio") municipio(P, k); else if (kind === "locanda") locanda(P, k); else porta(P, k);
+  }
   return P.L;
 }

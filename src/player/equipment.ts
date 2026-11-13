@@ -5,6 +5,7 @@ import { PBRCustomMaterial } from "@babylonjs/materials";
 import { lampLit, surfaceMaterial } from "../world/materials";
 import { hideTex, ironTex, leatherTex, planksTex, shieldFaceTex, steelTex, type TexPair } from "../world/textures";
 import { by } from "../style";
+import { LIGHT } from "../world/interiors";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EQUIPAGGIAMENTO — spada lunga d'acciaio, scudo tondo dipinto e cerchiato di ferro, e le mani
@@ -18,7 +19,7 @@ import { by } from "../style";
 
 function metal(scene: Scene, name: string, tex: TexPair, tint: Color3, rough: number, env: BaseTexture): PBRMaterial {
   const m = new PBRCustomMaterial(name, scene);
-  lampLit(m);   // la lama e i ferri prendono la luce dei lampioni come il resto
+  lampLit(m, LIGHT, 0.16);   // (e, dentro, quella della stanza, che ci si riflette)   // la lama e i ferri prendono la luce dei lampioni come il resto
   m.albedoTexture = tex.albedo;
   m.bumpTexture = tex.normal;
   m.bumpTexture.level = 0.6;
@@ -102,7 +103,7 @@ export function buildSword(scene: Scene, env: BaseTexture): TransformNode {
   const steel = metal(scene, "steel", steelTex(scene), new Color3(1, 1, 1), 0.36, env);
   const iron = metal(scene, "swordIron", ironTex(scene), new Color3(1.25, 1.2, 1.15), 0.5, env);
   const bronze = metal(scene, "bronze", ironTex(scene), new Color3(2.2, 1.5, 0.75), 0.42, env);
-  const wrap = surfaceMaterial(scene, "gripLeather", leatherTex(scene), { rough: 0.8 });
+  const wrap = surfaceMaterial(scene, "gripLeather", leatherTex(scene), { indoor: LIGHT, rough: 0.8 });
   steel.backFaceCulling = false;
   const add = (m: Mesh, mat: PBRMaterial): Mesh => { m.material = mat; m.parent = root; return m; };
 
@@ -142,10 +143,10 @@ export function buildSword(scene: Scene, env: BaseTexture): TransformNode {
 export function buildShield(scene: Scene, env: BaseTexture): TransformNode {
   const root = new TransformNode("shield", scene);
   const R = 0.37, T = 0.011, DOME = 0.05, Z0 = 0.03;
-  const face = surfaceMaterial(scene, "shieldFace", shieldFaceTex(scene), { rough: 0.72 });
-  const back = surfaceMaterial(scene, "shieldBack", planksTex(scene), { rough: 0.85, tint: new Color3(1.1, 1.0, 0.92) });
+  const face = surfaceMaterial(scene, "shieldFace", shieldFaceTex(scene), { indoor: LIGHT, rough: 0.72 });
+  const back = surfaceMaterial(scene, "shieldBack", planksTex(scene), { indoor: LIGHT, rough: 0.85, tint: new Color3(1.1, 1.0, 0.92) });
   const iron = metal(scene, "shieldIron", ironTex(scene), new Color3(1.05, 1, 0.97), 0.58, env);
-  const leather = surfaceMaterial(scene, "handleLeather", leatherTex(scene), { rough: 0.85 });
+  const leather = surfaceMaterial(scene, "handleLeather", leatherTex(scene), { indoor: LIGHT, rough: 0.85 });
   const add = (m: Mesh, mat: PBRMaterial): Mesh => { m.material = mat; m.parent = root; return m; };
 
   // il tavolato è una lente: bombato davanti, cavo dietro (dove sta il pugno)
@@ -230,9 +231,9 @@ export function buildArm(scene: Scene, name: string, mirror: boolean): Transform
   const sx = mirror ? -1 : 1;
   const hide = hideTex(scene);
   // ⚠️ niente `uv` sui materiali: le texture sono condivise per nome, la scala sta nelle uv dei tubi
-  const glove = surfaceMaterial(scene, `${name}Glove`, hide, { rough: 0.78, tint: new Color3(1.25, 1.02, 0.84) });
-  const sleeve = surfaceMaterial(scene, `${name}Sleeve`, hide, { rough: 0.9, tint: new Color3(0.8, 0.74, 0.66) });
-  const bracer = surfaceMaterial(scene, `${name}Bracer`, leatherTex(scene), { rough: 0.7, tint: new Color3(1.5, 1.2, 0.85) });
+  const glove = surfaceMaterial(scene, `${name}Glove`, hide, { indoor: LIGHT, rough: 0.78, tint: new Color3(1.25, 1.02, 0.84) });
+  const sleeve = surfaceMaterial(scene, `${name}Sleeve`, hide, { indoor: LIGHT, rough: 0.9, tint: new Color3(0.8, 0.74, 0.66) });
+  const bracer = surfaceMaterial(scene, `${name}Bracer`, leatherTex(scene), { indoor: LIGHT, rough: 0.7, tint: new Color3(1.5, 1.2, 0.85) });
   const V = (x: number, y: number, z: number): Vector3 => new Vector3(x * sx, y, z);
 
   const hand = new Geo();

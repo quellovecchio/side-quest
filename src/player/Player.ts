@@ -166,6 +166,8 @@ export class Player implements Target {
   private trailPos = new Float32Array(TRAIL_N * 6);
   private trailCol = new Float32Array(TRAIL_N * 8);
   locked = false;
+  /** In modalità editor il giocatore non riceve tastiera né mouse (e non chiede il puntatore): li usa l'editor. */
+  inputOff = false;
   /** Fermo e sordo ai comandi (mentre sceglie quanto dormire, mentre dorme). */
   private frozen = false;
   /** I numeri che il personaggio cambia (statistiche e abilità: main.ts): moltiplicatori del vigore di un colpo e di una parata, del passo, del danno ricevuto. */
@@ -175,6 +177,8 @@ export class Player implements Target {
   onDeath: (() => void) | null = null;
   /** Lo spostamento d'aria di un fendente: punto, direzione, forza (lo sente la foschia a terra). */
   onGust: ((x: number, z: number, dx: number, dz: number, str: number) => void) | null = null;
+  /** Mentre la lama passa, a ogni fotogramma: un punto della lama a terra, il verso in cui taglia, quanto spinge. */
+  onSweep: ((x: number, z: number, dx: number, dz: number, str: number) => void) | null = null;
 
   /** Il soffitto sopra un punto (i solai degli edifici); senza, si salta a cielo aperto. */
   ceiling: ((x: number, z: number, y: number) => number) | null = null;
@@ -356,6 +360,7 @@ export class Player implements Target {
     const canvas = this.scene.getEngine().getRenderingCanvas()!;
     addEventListener("keydown", (e) => {
       // il tasto E vale anche da fermi: fa scorrere le righe di un dialogo (chi lo riceve decide cosa farne: main.ts)
+      if (this.inputOff) return;
       if (e.code === "KeyE" && !e.repeat && this.locked && this.alive) this.onUse?.();
       if (this.frozen) return;
       this.keys.add(e.code);
@@ -367,6 +372,7 @@ export class Player implements Target {
     // ⚠️ pointerdown, non mousedown: Babylon fa preventDefault sul pointerdown e il browser allora
     // non emette più i mousedown di compatibilità
     canvas.addEventListener("pointerdown", (e) => {
+      if (this.inputOff) return;
       if (!this.locked) { canvas.requestPointerLock(); return; }
       if (this.frozen) return;
       if (e.button === 0) this.attack();
@@ -439,6 +445,11 @@ export class Player implements Target {
       sfx.whoosh(A.power > 1);
       this.onGust?.(this.pos.x + sy * 1.4, this.pos.z + cy * 1.4, cy * A.dir[0] + sy * A.dir[1], -sy * A.dir[0] + cy * A.dir[1], 3 + A.power * 1.5);
     } else if (this.phase === "swing") {
+      if (this.onSweep) {
+        // un fendente spazza da un fianco all'altro, il colpo dall'alto cala dritto davanti: cinque punti lungo la lama
+        const side = A.dir[0], a = this.yaw + side * (Math.min(1, this.pt / A.swing) - 0.5) * 1.5, bx = Math.sin(a), bz = Math.cos(a), k = dt * 60 * (0.35 + 0.2 * A.power);
+        for (let r = 0.8; r < 2.5; r += 0.4) this.onSweep(this.pos.x + bx * r, this.pos.z + bz * r, side * bz, -side * bx, k);
+      }
       if (!this.struck && this.pt >= A.swing * 0.5) { this.struck = true; this.strike(A); }
       if (this.phase === "swing" && this.pt >= A.swing) { this.phase = "hold"; this.pt = 0; this.kickT.setAll(0); }
     } else if (this.phase === "hold" && this.pt >= A.hold) {

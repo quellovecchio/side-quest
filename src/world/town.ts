@@ -1,16 +1,19 @@
-import { Color3, Matrix, Mesh, Scene, StandardMaterial, Vector3, VertexBuffer, type Material } from "@babylonjs/core";
+import { CustomMaterial } from "@babylonjs/materials";
+import { BaseTexture, Color3, type DirectionalLight, type Engine, Matrix, Mesh, RawTexture, Scene, StandardMaterial, Vector3, VertexBuffer, type Material } from "@babylonjs/core";
 import { Geo } from "./geo";
-import { embers, fire, flame } from "./flames";
-import { bakeLamps, surfaceMaterial } from "./materials";
+import { embers, fire, flame, group, markFlames, smoke } from "./flames";
+import { markProps, prop, propOwner, takeProps, type Want } from "./props";
+import { piece as kitPiece, type PieceId } from "./kit";
+import { addFlutter, bakeLamps, onPainted, surfaceMaterial } from "./materials";
 import { mulberry32 } from "./noise";
 import { LIP, entry, layout, seedOf } from "./layouts";
 import { TOWN } from "./terrain";
-import { clothTex, masonryTex, photoTex } from "./textures";
+import { clothTex, masonryTex, paintedTex, photoTex, type Painted } from "./textures";
 import type { DoorDef } from "./doors";
-import { createInterior, doorFronts, furnish, type Built } from "./interiors";
+import { createInterior, doorFronts, furnish, onInteriorShown, openDoors, type Built } from "./interiors";
 import { clearWay, type Floor } from "./levels";
 import type { Collider } from "./vegetation";
-import type { ChildDef, InteriorId, LocationDef, PrefabId } from "../data/db";
+import type { ChildDef, InteriorId, LocationDef, PrefabId, SpotDef } from "../data/db";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CITTÀ — una piccola città murata sul piano a est della conca, costruita dalle tavole in
@@ -46,7 +49,7 @@ export interface TownPlan {
 }
 
 /** Un interno: le sue mesh si accendono solo quando chi guarda è entro `r` metri da (x, z). */
-export interface Interior { meshes: Mesh[]; x: number; z: number; r: number }
+export interface Interior { id: string; meshes: Mesh[]; x: number; z: number; r: number }
 
 export interface Town {
   meshes: Mesh[]; colliders: Collider[]; plan: TownPlan;
@@ -59,15 +62,33 @@ export interface Town {
    * (`children[].id`). Le finestre di cattedrale e municipio non sono di nessuno: seguono solo l'ora.
    */
   windows(level: (id: string) => number): void;
+  /** Le lanterne che si accendono e si spengono: i lampioni (`lampione.N`, `lampione.porta`) e quelle degli edifici (col loro nome). */
+  lamps: { id: string; x: number; z: number }[];
+  /** Accende o spegne le lanterne con quel nome: il vetro e la pozza di luce cotta sulla strada (la fiammella la spegne chi chiama: flames.ts). */
+  light(id: string, on: boolean): void;
+  /** Solo in modalità editor (`createTown(..., { editor: true })`): le mesh di ogni elemento del file, nell'ordine, e chi costruisce un oggetto teso a parte. */
+  editor?: {
+    parts: Mesh[][]; span(c: ChildDef): Mesh[]; replan(walks: [number, number][][], spots: Record<string, SpotDef>): TownPlan;
+    /** Un elemento costruito da solo (`i` = il suo posto nell'elenco, per le copie da modello), e i selciati rifatti; le mesh dei selciati di partenza. */
+    build(c: ChildDef, i: number): { meshes: Mesh[]; props: Want[] }; paving(list: LocationDef["paving"]): Mesh[]; pavingMeshes: Mesh[];
+  };
 }
 
 export type V3 = [number, number, number];
 export type Tint = [number, number, number];
 /** `under` disegna anche il fondo di una scatola, `open` ne toglie il coperchio. */
-export interface Opt { uv?: number; tint?: Tint; rot?: V3; under?: boolean; open?: boolean }
+export interface Opt { uv?: number; tint?: Tint; rot?: V3; under?: boolean; open?: boolean; /** Niente faccia a +Z: la fa `wall`, con i vani. */ noFront?: boolean; /** Niente fianchi né retro: li fa `wall`. */ noSides?: boolean; /** Stoffa: quanto si muove al vento ogni vertice (0 = fermo … 1), dalla sua posizione locale. */ wave?: (p: V3) => number }
 
+/** I materiali che non si separano mai dal resto (chi li usa conta i loro vertici nella mesh comune: lumi, lanterne; o si muovono: stoffa). */
+const UNTAGGED = new Set(["lume", "lamp", "fire", "glass", "vetro", "dark", "cloth"]);
+/**
+ * L'arredo di strada: piccolo e basso, nella mappa d'ombre del sole (14 cm per pixel su tutto il mondo, coi bordi sfumati)
+ * la sua ombra quasi sparisce. Sta quindi in mesh a parte (chiave `<materiale>+`), che main.ts mette anche nella mappa
+ * piccola e nitida attorno a chi gioca (`setLiveShadow`): lì fontana, lampioni, banchi e carretti fanno un'ombra vera.
+ */
+const FURNITURE = new Set(["pozzo", "fontana", "banco", "panchina", "panca.pietra", "lampione", "botte", "cassa", "carretto", "bacheca", "lapidi"]);
 /** Metri per ripetizione della texture di ogni materiale. */
-const UV: Record<string, number> = { stone: 2.6, plaster: 3, timber: 1.2, wood: 1.2, slate: 2.4, tile: 2.4, thatch: 3, iron: 0.5, cloth: 0.33, flag: 3, sett: 1.6, cobble: 1.6, brick: 0.88, glass: 0.6, earth: 2 };
+const UV: Record<string, number> = { stone: 2.6, plaster: 3, timber: 1.2, wood: 1.2, slate: 2.4, tile: 2.4, thatch: 3, iron: 0.5, cloth: 0.33, flag: 3, sett: 1.6, cobble: 1.6, brick: 0.88, glass: 0.6, vetro: 0.6, earth: 2 };
 const PI = Math.PI;
 // tinte (lineari) per pietra in ombra, porte, stoffe
 const DARK: Tint = [0.62, 0.62, 0.62], DOOR: Tint = [0.55, 0.45, 0.38];
@@ -80,14 +101,25 @@ export class Mason {
   cell = 0;
   /** Si aggiunge al nome del materiale: ciò che si costruisce finisce in una Geo a parte (gli arredi minuti degli interni). */
   tag = "";
+  /** La chiave della mesh in cui finisce un materiale: col suo `tag`, tranne lumi, vetri e stoffe quando il tag è "+" (l'arredo di strada: vedi `createTown`). */
+  private key(k: string): string { return k + (this.tag === "+" && UNTAGGED.has(k) ? "" : this.tag); }
+  /** Il materiale di una chiave di mesh (senza il segno dell'arredo, `+`, o dell'elemento, `#n`). */
+  static material(key: string): string { return key.split(/[+#]/)[0]; }
   private stack: Matrix[] = [Matrix.Identity()];
+  private ks: number[] = [1];
   private get m(): Matrix { return this.stack[this.stack.length - 1]; }
+  /** Quanto è ingrandito il riferimento corrente: le uv e i raggi degli ostacoli ne tengono conto (la texture non si stira). */
+  get k(): number { return this.ks[this.ks.length - 1]; }
 
-  /** Esegue `f` in un riferimento locale: spostato, girato attorno a y, appena fuori piombo (`lean`). */
-  in(x: number, y: number, z: number, yaw: number, f: () => void, lean = 0): void {
-    this.stack.push(Matrix.RotationYawPitchRoll(yaw, 0, lean).multiply(Matrix.Translation(x, y, z)).multiply(this.m));
+  /**
+   * Esegue `f` in un riferimento locale: spostato, girato attorno a y, appena fuori piombo (`lean`), ingrandito di `k`
+   * (tutto, altezze comprese: un edificio scritto alla sua misura di disegno viene su una volta e mezzo).
+   */
+  in(x: number, y: number, z: number, yaw: number, f: () => void, lean = 0, k = 1): void {
+    this.stack.push(Matrix.Scaling(k, k, k).multiply(Matrix.RotationYawPitchRoll(yaw, 0, lean)).multiply(Matrix.Translation(x, y, z)).multiply(this.m));
+    this.ks.push(this.k * k);
     f();
-    this.stack.pop();
+    this.stack.pop(); this.ks.pop();
   }
 
   /** Un punto del riferimento corrente, nel mondo. */
@@ -98,11 +130,15 @@ export class Mason {
 
   /** Poligono convesso con la sua normale. Le uv sono le coordinate locali (di `src`) lungo i due assi più vicini al piano. */
   poly(k: string, pts: V3[], n: V3, o: Opt = {}, src: V3[] = pts): void {
-    const g = this.geos.get(k + this.tag) ?? new Geo();
-    this.geos.set(k + this.tag, g);
-    const s = o.uv ?? UV[k] ?? 1, ax = Math.abs(n[1]) > 0.7 ? [0, 2] : Math.abs(n[0]) > Math.abs(n[2]) ? [2, 1] : [0, 1];
+    const g = this.geos.get(this.key(k)) ?? new Geo();
+    this.geos.set(this.key(k), g);
+    const s = (o.uv ?? UV[k] ?? 1) / this.k, ax = Math.abs(n[1]) > 0.7 ? [0, 2] : Math.abs(n[0]) > Math.abs(n[2]) ? [2, 1] : [0, 1];
     const N = Vector3.TransformNormal(new Vector3(n[0], n[1], n[2]), this.m).normalize();
-    const put = (p: V3, q: V3): number => g.vert(Vector3.TransformCoordinates(new Vector3(p[0], p[1], p[2]), this.m), N, q[ax[0]] / s, q[ax[1]] / s, 1, o.tint);
+    const put = (p: V3, q: V3): number => {
+      const id = g.vert(Vector3.TransformCoordinates(new Vector3(p[0], p[1], p[2]), this.m), N, q[ax[0]] / s, q[ax[1]] / s, 1, o.tint);
+      if (o.wave) g.c[id * 4 + 3] = 1 - Math.max(0, Math.min(1, o.wave(p)));   // (il peso sta nell'alfa: vedi addFlutter)
+      return id;
+    };
     if (this.cell && pts.length === 4) {   // una griglia al posto del quadrilatero
       const len = (a: V3, b: V3): number => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
       const nu = Math.max(1, Math.ceil(Math.max(len(pts[0], pts[1]), len(pts[3], pts[2])) / this.cell)), nv = Math.max(1, Math.ceil(Math.max(len(pts[0], pts[3]), len(pts[1], pts[2])) / this.cell));
@@ -114,6 +150,27 @@ export class Mason {
     }
     const ids = pts.map((p, i) => put(p, src[i]));
     for (let i = 1; i < pts.length - 1; i++) g.tri(ids[0], ids[i], ids[i + 1]);
+  }
+
+  /**
+   * Un pezzo del kit (kit.ts) posato in (x, y, z): allungato di `size` lungo i suoi assi, girato di `rot` [attorno a x, a y,
+   * a z], tinto. Le uv si calcolano dalle sue misure vere, faccia per faccia (come per i poligoni), così allungarlo non
+   * stira la texture; l'occlusione cotta in Blender scurisce i vertici.
+   */
+  piece(name: PieceId, x: number, y: number, z: number, o: { size?: V3; rot?: V3; /** Una tinta per tutto il pezzo, o una per blocco (col nome del suo materiale nel kit). */ tint?: Tint | Record<string, Tint>; /** Tutto il pezzo in questo materiale, o un materiale per blocco (negli interni non c'è "timber"). */ as?: string | Record<string, string> } = {}): void {
+    const [sx, sy, sz] = o.size ?? [1, 1, 1], R = o.rot ? Matrix.RotationYawPitchRoll(o.rot[1], o.rot[0], o.rot[2]) : Matrix.Identity();
+    const T = R.multiply(Matrix.Translation(x, y, z)).multiply(this.m), P = new Vector3(), N = new Vector3();
+    for (const [own, b] of Object.entries(kitPiece(name))) {
+      const k = (typeof o.as === "string" ? o.as : o.as?.[own]) ?? own, g = this.geos.get(this.key(k)) ?? new Geo(), s = (UV[k] ?? 1) / this.k, ids: number[] = [], tint = Array.isArray(o.tint) ? o.tint : o.tint?.[own];
+      this.geos.set(this.key(k), g);
+      for (let v = 0; v < b.p.length; v += 3) {
+        const px = b.p[v] * sx, py = b.p[v + 1] * sy, pz = b.p[v + 2] * sz, nx = b.n[v] / sx, ny = b.n[v + 1] / sy, nz = b.n[v + 2] / sz;
+        const ax = Math.abs(ny) > Math.max(Math.abs(nx), Math.abs(nz)) ? [px, pz] : Math.abs(nx) > Math.abs(nz) ? [pz, py] : [px, py];
+        Vector3.TransformCoordinatesFromFloatsToRef(px, py, pz, T, P); Vector3.TransformNormalFromFloatsToRef(nx, ny, nz, T, N);
+        ids.push(g.vert(P.clone(), N.normalize().clone(), ax[0] / s, ax[1] / s, 0.35 + 0.65 * b.c[v / 3], tint));
+      }
+      for (let t = 0; t < b.i.length; t += 3) g.tri(ids[b.i[t]], ids[b.i[t + 1]], ids[b.i[t + 2]]);
+    }
   }
 
   /** Quadrilatero o triangolo: la normale si calcola e si gira dalla parte di `hint`. */
@@ -133,12 +190,35 @@ export class Mason {
       return pos ? [c[0] + v.x, c[1] + v.y, c[2] + v.z] : [v.x, v.y, v.z];
     };
     for (let ax = 0; ax < 3; ax++) for (const sg of [-1, 1]) {
-      if (ax === 1 && (sg < 0 ? !o.under : o.open)) continue;
+      if (ax === 1 && (sg < 0 ? !o.under : o.open) || ax === 2 && sg > 0 && o.noFront || o.noSides && (ax === 0 || ax === 2 && sg < 0)) continue;
       const u = (ax + 1) % 3, w = (ax + 2) % 3, n: V3 = [0, 0, 0];
       n[ax] = sg;
       const q = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([su, sw]) => { const p: V3 = [0, 0, 0]; p[ax] = sg * h[ax]; p[u] = su * h[u]; p[w] = sw * h[w]; return p; });
       this.poly(k, q.map((p) => tr(p, true)), tr(n, false), o, q.map((p) => [c[0] + p[0], c[1] + p[1], c[2] + p[2]] as V3));
     }
+  }
+
+  /**
+   * Parete sul piano z = 0 rivolta a +Z, fra (x0, y0) e (x1, y1), con i vani VERI: rettangoli [x0, y0, x1, y1] in ordine
+   * di x e senza sovrapporsi, profondi `depth`. La faccia va a pezzi attorno ai vani, ogni vano ha le sue quattro spallette.
+   * Un quinto numero diverso da zero fa il vano a sesto acuto (la sagoma di `arch`, dentro quel rettangolo).
+   */
+  wall(k: string, x0: number, y0: number, x1: number, y1: number, holes: number[][], depth: number, o: Opt = {}): void {
+    const q = (a: number, b: number, c: number, d: number): void => this.poly(k, [[a, b, 0], [c, b, 0], [c, d, 0], [a, d, 0]], [0, 0, 1], o);
+    let x = x0;
+    for (const [a, b, c, d, arched] of holes) {
+      q(x, y0, a, y1); q(a, y0, c, b); q(a, d, c, y1); x = c;
+      const top = arched ? d - (c - a) * 0.75 : d;   // dove finiscono le spallette dritte
+      for (const [px, n] of [[a, 1], [c, -1]]) this.poly(k, [[px, b, 0], [px, b, -depth], [px, top, -depth], [px, top, 0]], [n, 0, 0], o);
+      this.poly(k, [[a, b, 0], [c, b, 0], [c, b, -depth], [a, b, -depth]], [0, 1, 0], o);
+      if (!arched) { this.poly(k, [[a, d, 0], [c, d, 0], [c, d, -depth], [a, d, -depth]], [0, -1, 0], o); continue; }
+      for (const g of [-1, 1]) for (let i = 0; i < 5; i++) {   // i pennacchi fra il rettangolo e l'arco, e l'intradosso
+        const A = this.archSide((a + c) / 2, b, c - a, d - b, 0, g, i / 5), B = this.archSide((a + c) / 2, b, c - a, d - b, 0, g, (i + 1) / 5);
+        this.poly(k, [A, B, [B[0], d, 0], [A[0], d, 0]], [0, 0, 1], o);
+        this.face(k, [A, B, [B[0], B[1], -depth], [A[0], A[1], -depth]], [-g, -1, 0], o);
+      }
+    }
+    q(x, y0, x1, y1);
   }
 
   /** Sagoma a sesto acuto sul piano z, rivolta a +Z: porte, finestre, fornici. */
@@ -198,7 +278,7 @@ export class Mason {
 
   private circle(x: number, z: number, r: number): void {
     const p = Vector3.TransformCoordinates(new Vector3(x, 0, z), this.m);
-    this.colliders.push({ x: p.x, z: p.z, r });
+    this.colliders.push({ x: p.x, z: p.z, r: r * this.k });
   }
 
   /** Ostacolo: il perimetro di un rettangolo, a cerchi. */
@@ -217,36 +297,67 @@ export class Mason {
   /** Ostacolo a segmento, spesso r per parte, che ferma solo fra le quote y0 e y1 (dove due piani stanno uno sull'altro). Due estremi uguali: un cerchio. */
   seg(x0: number, z0: number, x1: number, z1: number, r: number, y0: number, y1: number): void {
     const a = this.world(x0, y0, z0), b = this.world(x1, y1, z1);
-    this.colliders.push(x0 === x1 && z0 === z1 ? { x: a.x, z: a.z, r, y0: a.y, y1: b.y } : { x: a.x, z: a.z, bx: b.x, bz: b.z, r, y0: a.y, y1: b.y });
+    const rr = r * this.k;
+    this.colliders.push(x0 === x1 && z0 === z1 ? { x: a.x, z: a.z, r: rr, y0: a.y, y1: b.y } : { x: a.x, z: a.z, bx: b.x, bz: b.z, r: rr, y0: a.y, y1: b.y });
   }
 }
 
 // ── pezzi di facciata (nel riferimento della facciata: piano z = 0, rivolto a +Z) ──
 
-function win(M: Mason, x: number, y: number, w: number, h: number, k: string, arched = false): void {
+// ── finestre da cui si vede dentro ──
+// Un edificio in cui si entra ha le finestre APERTE dove la pianta ha una nicchia allo stesso posto (layouts.ts, `deep`): lì
+// il vetro è una lastra trasparente (`vetro`) e, un filo dietro, resta il lume opaco di sempre. Da lontano l'interno non sta
+// nella scena e si vede il lume (acceso o spento); avvicinandosi l'interno entra in scena e quel lume SFUMA (l'alfa dei suoi
+// vertici), fino a un velo: ciò che resta è il chiarore del vetro di una stanza accesa. Così non c'è scatto, e da lontano
+// la città non paga gli interni. `THRU` raccoglie, per l'edificio in costruzione, quali vertici dei lumi sono di finestre
+// aperte; `GLOW` da dove la loro luce cade sulla strada (un metro e mezzo davanti a ognuna).
+/** Mentre è vero le finestre a telaio si disegnano con le imposte CHIUSE: dietro non c'è una stanza (il sottotetto della casa del ricco). */
+let SHUT = false;
+/** Due imposte di tavole chiuse sul vano da (a, y) a (b, yt), sul piano z. */
+function boards(M: Mason, a: number, y: number, b: number, yt: number, z: number): void {
+  M.box("wood", a, y, z, b, yt, z + 0.035, { tint: DOOR });
+  M.box("timber", (a + b) / 2 - 0.012, y, z + 0.035, (a + b) / 2 + 0.012, yt, z + 0.042, { tint: DARK });
+  for (const f of [0.2, 0.8]) M.box("timber", a + 0.03, y + (yt - y) * f - 0.035, z + 0.035, b - 0.03, y + (yt - y) * f + 0.035, z + 0.06);
+}
+let THRU: number[] | null = null, SEE = false, GLOW: { x: number; y: number; z: number }[] = [];
+/** Ciò che `f` disegna sono finestre aperte (se l'edificio ha un interno). */
+const see = (f: () => void): void => { SEE = !!THRU; f(); SEE = false; };
+/** Il vetro di una finestra col centro in (cx, cy, z): `draw(materiale, scarto in z)`. */
+function pane(M: Mason, k: string, cx: number, cy: number, z: number, draw: (k: string, dz: number) => void): void {
+  if (!SEE || k !== "lume") { draw(k, 0); return; }
+  const w = M.world(cx, cy, z + 2);
+  GLOW.push({ x: w.x, y: w.y, z: w.z });
+  const n = (): number => (M.geos.get("lume")?.p.length ?? 0) / 3, a = n();
+  draw("vetro", 0); draw(k, -0.004);
+  THRU!.push(a, n());
+}
+
+/** `deep` (solo ad arco) = quanto il vetro sta dentro il muro: il vano lo apre `Mason.wall` (`[x - w / 2, y, x + w / 2, y + h, 1]`). */
+function win(M: Mason, x: number, y: number, w: number, h: number, k: string, arched = false, deep = 0): void {
   if (arched) {
+    const zg = deep ? -deep : 0.05, zb = deep ? -deep + 0.025 : 0.05;   // il vetro, la ferrata
     // finestra di pietra: il vetro in fondo, attorno i conci in rilievo (piedritti e arco a pezzi alterni), il davanzale che
     // sporge, la ferrata
     const spring = Math.max(0, h - w * 0.75), n = 5;
-    M.arch("stone", x, y - 0.18, w + 0.4, h + 0.36, 0.02, { tint: DARK });
-    M.arch(k, x, y, w, h, 0.05);
+    if (!deep) M.arch("stone", x, y - 0.18, w + 0.4, h + 0.36, 0.02, { tint: DARK });
+    pane(M, k, x, y + h / 2, zg, (kk, dz) => M.arch(kk, x, y, w, h, zg + dz));
     for (const g of [-1, 1]) {
-      for (let i = 0, yy = y; yy < y + spring - 0.05; i++, yy += 0.36) M.box("stone", x + g * (w / 2 + 0.11) - (i % 2 ? 0.16 : 0.11), yy, 0, x + g * (w / 2 + 0.11) + (i % 2 ? 0.16 : 0.11), Math.min(yy + 0.34, y + spring), 0.15, { tint: i % 2 ? DARK : undefined });
+      for (let i = 0, yy = y; yy < y + spring - 0.05; i++, yy += 0.36) M.box(TRIM, x + g * (w / 2 + 0.11) - (i % 2 ? 0.16 : 0.11), yy, 0, x + g * (w / 2 + 0.11) + (i % 2 ? 0.16 : 0.11), Math.min(yy + 0.34, y + spring), 0.15, { tint: i % 2 ? GOLA : LISCIA });
       for (let i = 0; i < n; i++) {
         const a = M.archSide(x, y, w + 0.22, h + 0.11, 0, g, i / n), b = M.archSide(x, y, w + 0.22, h + 0.11, 0, g, (i + 1) / n);
         const cx = (a[0] + b[0]) / 2, cy = (a[1] + b[1]) / 2, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        M.box("stone", cx - L / 2 - 0.015, cy - 0.11, 0, cx + L / 2 + 0.015, cy + 0.11, 0.15, { rot: [0, 0, Math.atan2(b[1] - a[1], b[0] - a[0])], tint: i % 2 ? undefined : DARK });
+        M.box(TRIM, cx - L / 2 - 0.015, cy - 0.11, 0, cx + L / 2 + 0.015, cy + 0.11, 0.15, { rot: [0, 0, Math.atan2(b[1] - a[1], b[0] - a[0])], tint: i % 2 ? LISCIA : GOLA });
       }
     }
-    M.box("stone", x - w / 2 - 0.3, y - 0.17, 0, x + w / 2 + 0.3, y - 0.02, 0.26, { tint: DARK, under: true });
-    M.box("iron", x - 0.018, y, 0.05, x + 0.018, y + h - w * 0.16, 0.085);
-    for (let i = 1; i * 0.5 < spring + 0.2; i++) M.box("iron", x - w / 2, y + i * 0.5 - 0.015, 0.05, x + w / 2, y + i * 0.5 + 0.015, 0.08);
+    M.box(TRIM, x - w / 2 - 0.3, y - 0.17, -deep, x + w / 2 + 0.3, y - 0.02, 0.26, { tint: LISCIA, under: true });
+    M.box("iron", x - 0.018, y, zb, x + 0.018, y + h - w * 0.16, zb + 0.035);
+    for (let i = 1; i * 0.5 < spring + 0.2; i++) M.box("iron", x - w / 2, y + i * 0.5 - 0.015, zb, x + w / 2, y + i * 0.5 + 0.015, zb + 0.03);
     return;
   }
   // finestra a telaio: il vetro in fondo a un telaio spesso, la croce, l'architrave e il davanzale che sporgono; se non è
   // una vetrina, due imposte di tavole aperte contro il muro, con le traverse e le bandelle di ferro
   const f = 0.09, dz = 0.15;
-  M.box(k, x - w / 2, y, 0, x + w / 2, y + h, 0.03);
+  if (SHUT) boards(M, x - w / 2, y, x + w / 2, y + h, 0); else M.box(k, x - w / 2, y, 0, x + w / 2, y + h, 0.03);
   for (const s of [-1, 1]) M.box("timber", x + s * (w / 2 + f / 2) - f / 2, y - f, 0, x + s * (w / 2 + f / 2) + f / 2, y + h + f, dz);
   M.box("timber", x - w / 2, y + h, 0, x + w / 2, y + h + f, dz);
   M.box("timber", x - w / 2 - 0.17, y + h + f, 0, x + w / 2 + 0.17, y + h + f + 0.1, dz + 0.05, { under: true });
@@ -254,19 +365,255 @@ function win(M: Mason, x: number, y: number, w: number, h: number, k: string, ar
   M.box("timber", x - w / 2, y - f + 0.03, 0, x + w / 2, y, dz);
   M.box("timber", x - 0.03, y, 0.03, x + 0.03, y + h, 0.1);
   M.box("timber", x - w / 2, y + h * 0.55 - 0.03, 0.03, x + w / 2, y + h * 0.55 + 0.03, 0.1);
+  if (SHUT) return;
+  M.piece("piombi", x - w / 2, y, 0.032, { size: [w, h, 1] });
   if (w > 1.3) return;
-  for (const s of [-1, 1]) {
-    const a = x + s * (w / 2 + f + 0.03), b = a + s * w * 0.5, x0 = Math.min(a, b), x1 = Math.max(a, b);
-    M.box("wood", x0, y, 0.015, x1, y + h, 0.06, { tint: DOOR });
-    for (const yy of [y + h * 0.18, y + h * 0.78]) { M.box("timber", x0 + 0.02, yy - 0.05, 0.06, x1 - 0.02, yy + 0.05, 0.09); M.box("iron", Math.min(a, a + s * 0.24), yy - 0.018, 0.09, Math.max(a, a + s * 0.24), yy + 0.018, 0.1); }
+  // le imposte vere (kit), staccate dal muro quanto basta a stare DAVANTI alle travi del graticcio, che sporgono di 10–11 cm
+  M.piece("imposta", x + w / 2 + f + 0.03, y, 0.115, { size: [w, h, 1], tint: { wood: DOOR } });
+  M.piece("imposta", x - w / 2 - f - 0.03, y + h, 0.115, { size: [w, h, 1], rot: [0, 0, PI], tint: { wood: DOOR } });
+}
+
+/**
+ * Una fascia di pietra che segue un sesto acuto, piedritti compresi: fra la sagoma (w, h) e quella più larga di `t` (con
+ * l'imposta alla stessa quota), sporgente dal muro da z0 a z1. Ghiere dei portali, cornici delle finestre, arcatelle.
+ */
+function archRing(M: Mason, k: string, cx: number, y0: number, w: number, h: number, t: number, z0: number, z1: number, o: Opt = {}): void {
+  const n = 6, line = (ww: number, hh: number): V3[] => {
+    const p: V3[] = [[cx - ww / 2, y0, 0]];
+    for (let i = 0; i <= n; i++) p.push(M.archSide(cx, y0, ww, hh, 0, -1, i / n));
+    for (let i = n - 1; i >= 0; i--) p.push(M.archSide(cx, y0, ww, hh, 0, 1, i / n));
+    p.push([cx + ww / 2, y0, 0]);
+    return p;
+  };
+  const a = line(w, h), b = line(w + 2 * t, h + 1.5 * t), at = (p: V3, z: number): V3 => [p[0], p[1], z], cy = y0 + h * 0.45;
+  for (let i = 0; i < a.length - 1; i++) {
+    const mx = (a[i][0] + a[i + 1][0]) / 2 - cx, my = (a[i][1] + a[i + 1][1]) / 2 - cy;
+    M.face(k, [at(a[i], z1), at(a[i + 1], z1), at(b[i + 1], z1), at(b[i], z1)], [0, 0, 1], o);
+    M.face(k, [at(a[i], z0), at(a[i + 1], z0), at(a[i + 1], z1), at(a[i], z1)], [-mx, -my, 0], o);
+    M.face(k, [at(b[i], z0), at(b[i + 1], z0), at(b[i + 1], z1), at(b[i], z1)], [mx, my, 0], o);
   }
 }
+
+/**
+ * Bifora di pietra su un muro pieno (torri, navate): il vetro a filo del muro e, davanti, ciò che le dà corpo: la cornice a
+ * due gole che sporge di `out`, il davanzale, i trafori scolpiti (kit) con la colonnina in mezzo.
+ */
+function lancet(M: Mason, x: number, y: number, w: number, h: number, k: string, out = 0.24, deep = 0): void {
+  const t = Math.min(0.24, w * 0.2), sp = y + h - w * 0.75, zg = deep ? -deep : 0.012;   // (`deep`: il vetro in fondo al vano che `Mason.wall` ha aperto)
+  pane(M, k, x, y + h / 2, zg, (kk, dz) => M.arch(kk, x, y, w, h, zg + dz));
+  archRing(M, TRIM, x, y, w, h, t, 0, out, { tint: LISCIA });
+  archRing(M, TRIM, x, y, w + 2 * t, h + 1.5 * t, 0.07, 0, out * 0.45, { tint: GOLA });
+  M.box(TRIM, x - w / 2 - t - 0.12, y - 0.2, 0, x + w / 2 + t + 0.12, y, out + 0.1, { tint: LISCIA, under: true });
+  M.piece("trafori", x, sp, 0.03, { size: [w, w, 1.2], as: TRIM, tint: LISCIA });
+  M.box(TRIM, x - 0.045 * w, y, 0.03, x + 0.045 * w, sp, 0.15, { tint: LISCIA });
+}
+
+/** Contrafforte a tre riseghe nel riferimento del suo muro (sporge verso +Z): zoccolo, spioventi a ogni risega, la guglia in cima (kit). */
+function buttress(M: Mason, h: number): void {
+  const hw = 0.5, st = [[0, 1.3], [h * 0.42, 1.1], [h * 0.78, 0.9]];   // [da che quota, quanto sporge]
+  st.forEach(([y, d], i) => {
+    const top = i < 2 ? st[i + 1][0] : h;
+    M.box("stone", -hw, y, 0, hw, top, d, { tint: DARK });
+    if (i === 2) return;
+    const nd = st[i + 1][1], up = top + (d - nd) * 1.2;   // lo spiovente fino alla risega di sopra
+    M.face(TRIM, [[-hw, top, d], [hw, top, d], [hw, up, nd], [-hw, up, nd]], [0, 1, 1], { tint: LISCIA });
+    for (const s of [-1, 1]) M.face("stone", [[s * hw, top, d], [s * hw, top, nd], [s * hw, up, nd]], [s, 0, 0]);
+  });
+  M.box("stone", -hw - 0.07, 0, 0, hw + 0.07, 0.55, 1.37, { tint: DARK });
+  M.piece("guglia", 0, h, 0.6, { size: [1.3, 1.3, 1.3], as: TRIM, tint: LISCIA });
+}
+
+const SASH = 0.07, DEEP = 0.08;
+// la pietra LAVORATA (cornici, trafori, colonnine, guglie): liscia e chiara, o sul muro a sassi non si legge. È l'intonaco tinto.
+const TRIM = "plaster", LISCIA: Tint = [0.74, 0.68, 0.57], GOLA: Tint = [0.5, 0.46, 0.39];
+const NOISE_GLSL = `
+float sqGh(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float sqGn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(sqGh(i), sqGh(i + vec2(1.0, 0.0)), f.x), mix(sqGh(i + vec2(0.0, 1.0)), sqGh(i + vec2(1.0, 1.0)), f.x), f.y); }`;
+
+/**
+ * Il lume delle finestre viste da lontano (e il velo che ne resta da vicino). Non è una lampadina: dietro ci sono fuochi e
+ * candele, quindi è ambra e non arancio pieno, non è uguale su tutta la finestra (più chiaro dove sta la fiamma, più
+ * scuro verso gli angoli) e TREMA, ogni finestra per conto suo (la fase viene dalla posizione nel mondo).
+ * ⚠️ HDR: passa appena la soglia del bloom; più acceso diventa una lampadina bianca.
+ */
+function lumeMat(scene: Scene): Material {
+  const m = new CustomMaterial("town_lume", scene);
+  m.diffuseColor = Color3.Black(); m.emissiveColor = new Color3(0.98, 0.66, 0.36); m.specularColor = Color3.Black(); m.backFaceCulling = false;   // (il colore di un muro chiaro alla luce del fuoco, non una lampadina arancione)
+  m.AddUniform("sqTime", "float", undefined);
+  m.Fragment_Definitions(NOISE_GLSL);
+  m.Fragment_Before_FragColor(`
+    float sqPh = vPositionW.x * 1.7 + vPositionW.z * 1.3 + floor(vPositionW.y * 0.33) * 2.1;
+    float sqT = sqTime * (0.8 + 0.4 * fract(sqPh * 0.137));
+    float sqF = 0.84 + 0.1 * sin(sqT * 5.3 + sqPh) + 0.07 * sin(sqT * 12.7 - sqPh * 1.9) + 0.06 * sin(sqT * 2.3 + sqPh * 0.6);
+    // la luce dentro non è uniforme: chiazze larghe che si spostano piano (ombre di chi passa davanti al fuoco), una
+    // grana più fitta che guizza con la fiamma, più chiaro in basso (dove stanno fuoco e candele) che verso il soffitto
+    vec2 sqQ = vec2(vPositionW.x + vPositionW.z, vPositionW.y);
+    float sqS = sqGn(sqQ * 1.6 + vec2(sqTime * 0.13, sqTime * 0.08)), sqS2 = sqGn(sqQ * 4.7 - vec2(sqTime * 0.5, sqTime * 0.31));
+    float sqUp = 0.82 + 0.3 * (1.0 - fract(vPositionW.y * 0.31));
+    color.rgb *= sqF * (0.5 + 0.5 * sqS + 0.22 * sqS2) * sqUp;
+  `);
+  const attach = m.AttachAfterBind.bind(m);
+  m.AttachAfterBind = (mesh, effect) => { attach(mesh, effect); effect.setFloat("sqTime", performance.now() / 1000); };
+  return m;
+}
+
+/** Va chiamata un attimo prima di disegnare il vetro (createTown la appende alla sua mesh). */
+let GRAB: () => void = () => {};
+
+/**
+ * La scena già disegnata, copiata in una texture a metà fotogramma: tutto ciò che viene prima del vetro (il mondo, e fra le
+ * trasparenti il lume). Babylon non la dà: si copia a mano il framebuffer corrente (WebGL2, `blitFramebuffer`, che scioglie
+ * anche l'antialiasing) in una texture nostra, avvolta perché un materiale la possa leggere. Vale solo nel passaggio
+ * principale (non nelle mappe d'ombra, dove il vetro pure si disegna) e una volta per fotogramma. La texture si crea
+ * all'INIZIO di un fotogramma (mai a metà: toccare le texture alle spalle di Babylon vuole `wipeCaches`), nel formato del
+ * bersaglio corrente (con l'antialiasing i due formati devono coincidere). Se qualcosa non torna (niente WebGL2, niente
+ * bersaglio HDR, un errore alla prima copia) non c'è rifrazione e il vetro resta trasparente com'era.
+ */
+function grabber(scene: Scene): { grab(): void; tex(): BaseTexture | null; w(): number; h(): number } {
+  const engine = scene.getEngine() as Engine, gl = engine._gl as WebGL2RenderingContext;
+  let fbo: WebGLFramebuffer | null = null, raw: WebGLTexture | null = null, tex: BaseTexture | null = null;
+  let w = 0, h = 0, want: [number, number, number] | null = null, main = false, dead = !gl || !gl.blitFramebuffer, tried = false, fresh = false;
+  scene.onBeforeDrawPhaseObservable.add(() => { main = true; });
+  scene.onAfterDrawPhaseObservable.add(() => { main = false; });
+  scene.onBeforeRenderObservable.add(() => {
+    if (dead || !want) return;
+    const [W, H, type] = want, fmt = type === 2 ? [gl.RGBA16F, gl.HALF_FLOAT] : type === 1 ? [gl.RGBA32F, gl.FLOAT] : [gl.RGBA8, gl.UNSIGNED_BYTE];
+    want = null;
+    if (raw) { gl.deleteTexture(raw); gl.deleteFramebuffer(fbo); }
+    raw = gl.createTexture(); fbo = gl.createFramebuffer();
+    gl.bindTexture(gl.TEXTURE_2D, raw);
+    gl.texImage2D(gl.TEXTURE_2D, 0, fmt[0], W, H, 0, gl.RGBA, fmt[1], null);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, raw, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindTexture(gl.TEXTURE_2D, null);
+    engine.wipeCaches(true);
+    tex = new BaseTexture(scene, engine.wrapWebGLTexture(raw!, false, 2, W, H));   // (2 = bilineare)
+    w = W; h = H; fresh = false;
+  });
+  return {
+    tex: () => (dead || !fresh ? null : tex), w: () => w, h: () => h,
+    grab() {
+      const rt = engine._currentRenderTarget;
+      if (dead || !main || !rt?.texture) return;
+      main = false;
+      const W = rt.width, H = rt.height;
+      if (W !== w || H !== h) { want = [W, H, rt.texture.type]; fresh = false; return; }
+      const cur = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, cur); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, cur);
+      if (!tried) { tried = true; if (gl.getError() !== gl.NO_ERROR) { dead = true; console.warn("vetro: niente rifrazione (la copia della scena non è riuscita)"); return; } }
+      fresh = true;
+    },
+  };
+}
+
+/**
+ * Il vetro delle finestre aperte: vetro soffiato, non una lastra moderna. È ondulato (la normale si piega con un rumore
+ * lento e una grana fine), quindi il riflesso del cielo e il lampo del sole non sono piatti ma si rompono e scorrono
+ * camminando; di fronte è quasi trasparente, di sbieco riflette (Fresnel); ha un'ombra verdastra appena accennata.
+ * Il cielo riflesso è il colore della nebbia (l'orizzonte di quell'ora), più scuro verso terra.
+ * RIFRANGE: un attimo prima di disegnarlo, ciò che è già a schermo viene copiato in una texture (`grabber`), e il vetro la
+ * rilegge spostata di quanto la sua normale è piegata (più da vicino, meno da lontano), coi tre colori spostati appena
+ * diversamente (la frangia colorata ai bordi di ciò che si vede attraverso). Senza copia (vedi `grabber`) torna trasparente.
+ * ⚠️ Niente `opacityFresnelParameters`: in Babylon quell'opacità si SOMMA all'alfa e la faccia vista da dietro vale sempre
+ * "di sbieco" (da dentro il vetro diventava un muro): qui la normale si gira verso chi guarda e il conto è fatto a mano.
+ */
+function glassMat(scene: Scene): Material {
+  const m = new CustomMaterial("town_vetro", scene), sun = new Vector3(), ZERO = Color3.Black(), back = grabber(scene);
+  GRAB = back.grab;
+  m.diffuseColor = new Color3(0.06, 0.09, 0.08); m.emissiveColor = Color3.Black(); m.specularColor = new Color3(0.9, 0.88, 0.8); m.specularPower = 160;
+  m.backFaceCulling = false; m.alpha = 0.16;
+  // ⚠️ Con la rifrazione il vetro esce ad alfa 1: se il materiale potesse scrivere anche profondità e normali (il "prepass"
+  // dell'occlusione ambientale lo fa per ogni pixel con alfa > 0,4) l'occlusione lo prenderebbe per un muro in fondo a una
+  // nicchia e lo scurirebbe del 60%. Un materiale che non scrive la profondità non partecipa.
+  m.disableDepthWrite = true;
+  m.AddUniform("sqSky", "vec3", undefined); m.AddUniform("sqSunDir", "vec3", undefined); m.AddUniform("sqSunCol", "vec3", undefined);
+  m.AddUniform("sqScene", "sampler2D", RawTexture.CreateRGBATexture(new Uint8Array(4), 1, 1, scene)); m.AddUniform("sqRes", "vec3", undefined);   // la scena dietro, la sua misura, se c'è
+  m.Fragment_Definitions(NOISE_GLSL);
+  m.Fragment_Before_FragColor(`
+    vec3 sqV = normalize(vEyePosition.xyz - vPositionW);
+    vec3 sqN = normalize(vNormalW); if (dot(sqN, sqV) < 0.0) sqN = -sqN;
+    vec3 sqTx = normalize(vec3(sqN.z, 0.0, -sqN.x) + vec3(1e-4, 0.0, 0.0));
+    vec2 sqU = vec2(dot(vPositionW, sqTx), vPositionW.y);                       // metri sul piano del vetro
+    // le onde del vetro: larghe e lente, più una grana fine
+    vec2 sqW = vec2(sqGn(sqU * 7.0) - 0.5, sqGn(sqU * 7.0 + 31.7) - 0.5) * 0.22 + vec2(sqGn(sqU * 41.0) - 0.5, sqGn(sqU * 41.0 + 9.3) - 0.5) * 0.05;
+    vec3 sqN2 = normalize(sqN + sqTx * sqW.x + vec3(0.0, 1.0, 0.0) * sqW.y);
+    float sqF = 0.05 + 0.95 * pow(1.0 - max(dot(sqN2, sqV), 0.0), 4.0);
+    vec3 sqR = reflect(-sqV, sqN2);
+    // (qui il colore è già lineare: il cielo, che è dato in gamma, va portato in lineare)
+    vec3 sqEnv = pow(sqSky, vec3(2.2)) * mix(0.22, 1.25, smoothstep(-0.2, 0.45, sqR.y));
+    float sqGl = pow(max(dot(sqR, sqSunDir), 0.0), 260.0) + 0.15 * pow(max(dot(sqR, sqSunDir), 0.0), 24.0);   // il sole: un lampo e il suo alone
+    vec3 sqTint = mix(vec3(0.86, 0.97, 0.9), vec3(1.0), sqGn(sqU * 2.3 + 5.0));   // l'ombra verdastra del vetro, appena
+    if (sqRes.z > 0.5) {
+      // rifrazione: la scena dietro, letta dove la piega del vetro la sposta; rosso e blu un filo più in qua e più in là
+      vec2 sqUv = gl_FragCoord.xy / sqRes.xy, sqO = sqW * vec2(sqRes.y / sqRes.x, 1.0) * (0.045 / max(length(vEyePosition.xyz - vPositionW), 1.0));
+      vec3 sqB = vec3(texture2D(sqScene, sqUv + sqO * 0.82).r, texture2D(sqScene, sqUv + sqO).g, texture2D(sqScene, sqUv + sqO * 1.2).b);
+      color.rgb = mix(mix(sqB * sqTint, color.rgb, 0.06), sqEnv, sqF) + sqSunCol * sqGl;
+      color.a = 1.0;
+    } else {
+      color.rgb = mix(color.rgb * sqTint, sqEnv, sqF) + sqSunCol * sqGl;
+      color.a = clamp(color.a + sqF * 0.8 + sqGl * 2.0, 0.0, 1.0);
+    }
+  `);
+  const attach = m.AttachAfterBind.bind(m);
+  m.AttachAfterBind = (mesh, effect) => {
+    attach(mesh, effect);
+    const s = scene.getLightByName("sun") as DirectionalLight | null, up = s ? -s.direction.y : 0;
+    effect.setColor3("sqSky", scene.fogColor);
+    effect.setVector3("sqSunDir", s ? sun.copyFrom(s.direction).scaleInPlace(-1) : sun.set(0, 1, 0));
+    effect.setColor3("sqSunCol", s && up > 0 ? s.diffuse.scale(Math.min(1.4, s.intensity * 0.5)) : ZERO);
+    const t = back.tex();
+    if (t) effect.setTexture("sqScene", t);
+    effect.setFloat3("sqRes", back.w(), back.h(), t ? 1 : 0);
+  };
+  return m;
+}
+
+/** Il vano che `sash` vuole nel muro (per `Mason.wall`): la luce più il telaio. */
+const hole = (x: number, y: number, w: number, h: number): number[] => [x - w / 2 - SASH, y - SASH, x + w / 2 + SASH, y + h + SASH];
+/**
+ * Finestra a telaio INCASSATA nel suo vano (`hole`, aperto da `Mason.wall`): il vetro 8 cm dentro il muro con la rete dei
+ * piombi (kit), il telaio nello sguancio, la croce, davanzale e architrave che sporgono, due imposte vere (kit) aperte
+ * contro il muro, davanti alle travi del graticcio. Più in fondo di così no: lì cominciano i vetri della nicchia di dentro.
+ */
+function sash(M: Mason, x: number, y: number, w: number, h: number, k: string, shutters = true): void {
+  const f = SASH, z = -DEEP, a = x - w / 2, b = x + w / 2;
+  if (SHUT) boards(M, a, y, b, y + h, z);
+  else { pane(M, k, x, y + h / 2, z, (kk, dz) => M.poly(kk, [[a, y, z + dz], [b, y, z + dz], [b, y + h, z + dz], [a, y + h, z + dz]], [0, 0, 1])); M.piece("piombi", a, y, z + 0.004, { size: [w, h, 1] }); }
+  M.box("timber", a - f, y - f, z, a, y + h + f, -0.01); M.box("timber", b, y - f, z, b + f, y + h + f, -0.01);
+  M.box("timber", a, y + h, z, b, y + h + f, -0.01, { under: true }); M.box("timber", a, y - f, z, b, y, -0.01);
+  M.box("timber", x - 0.025, y, z, x + 0.025, y + h, z + 0.045); M.box("timber", a, y + h * 0.55 - 0.025, z, b, y + h * 0.55 + 0.025, z + 0.045);
+  M.box("timber", a - f - 0.1, y + h + f, 0, b + f + 0.1, y + h + f + 0.1, 0.2, { under: true });
+  M.box("timber", a - f - 0.12, y - f - 0.07, z, b + f + 0.12, y - f, 0.27, { under: true });
+  if (!shutters || SHUT) return;   // (una vetrina non ne ha)
+  const sw = (w / 2 + f * 0.5) / 0.5;
+  M.piece("imposta", b + f + 0.03, y, 0.115, { size: [sw, h, 1], tint: { wood: DOOR } });
+  M.piece("imposta", a - f - 0.03, y + h, 0.115, { size: [sw, h, 1], rot: [0, 0, PI], tint: { wood: DOOR } });
+}
+
+/**
+ * Un drappo appeso per l'orlo di sopra (y1) sul piano z: una griglia fitta che il vento muove, più in basso più forte;
+ * `tail` = quanto è lunga la coda di rondine in fondo.
+ */
+function drape(M: Mason, x0: number, y0: number, x1: number, y1: number, z: number, tint: Tint, tail = 0): void {
+  const was = M.cell, wave = (p: V3): number => (y1 - p[1]) / (y1 - y0 + tail), xm = (x0 + x1) / 2;
+  M.cell = 0.3;
+  M.poly("cloth", [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], [0, 0, 1], { tint, wave });
+  M.cell = was;
+  if (tail) { M.poly("cloth", [[x0, y0, z], [xm, y0, z], [x0, y0 - tail, z]], [0, 0, 1], { tint, wave }); M.poly("cloth", [[xm, y0, z], [x1, y0, z], [x1, y0 - tail, z]], [0, 0, 1], { tint, wave }); }
+}
+
+/** Un angolo "a caso" che dipende solo dal posto: gli arredi da modello non devono estrarre numeri da `rnd`. */
+const turn = (p: { x: number; z: number }): number => (Math.abs(Math.sin(p.x * 12.9898 + p.z * 78.233) * 43758.5453) % 1) * 2 * PI;
 
 /** Comignolo: il fusto, la cimasa che sporge, due canne di cotto. */
 function chimney(M: Mason, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
   M.box("stone", x0, y0, z0, x1, y1, z1, { tint: DARK });
   M.box("stone", x0 - 0.09, y1, z0 - 0.09, x1 + 0.09, y1 + 0.13, z1 + 0.09, { under: true });
   const cz = (z0 + z1) / 2, n = x1 - x0 > 0.75 ? 2 : 1;
+  smoke(M.world((x0 + x1) / 2, y1 + 0.5, cz), 1.1, 2);   // il fumo esce finché in casa arde il fuoco (il gruppo dell'edificio)
   for (let i = 0; i < n; i++) { const cx = x0 + (x1 - x0) * (i + 0.5) / n; M.drum("tile", cx, cz, 0.12, y1 + 0.13, y1 + 0.5, {}, 0.1, 8); M.drum("dark", cx, cz, 0.075, y1 + 0.5, y1 + 0.505, {}, 0.075, 8); }
 }
 
@@ -286,21 +633,28 @@ function door(M: Mason, x: number, w: number, h: number, arched = false): void {
 }
 
 /** Graticcio: correnti, montanti e le saette nelle campate d'angolo. */
-function frame(M: Mason, w: number, y0: number, y1: number, bays: number): void {
+/** `gaps` = le finestre di quella parete [centro, larghezza, sotto, sopra]: un montante che ci cadrebbe dentro si ferma al davanzale e riprende sopra l'architrave, e una saetta che le attraverserebbe non si mette. */
+function frame(M: Mason, w: number, y0: number, y1: number, bays: number, gaps: number[][] = []): void {
   const hw = w / 2, t = 0.09, bw = w / bays, h = y1 - y0 - 0.32, a = Math.atan2(bw - 2 * t, h), L = Math.hypot(bw - 2 * t, h);
   // (le travi sporgono dall'intonaco quanto una mano: l'ombra fra trave e riquadro è ciò che dà corpo alla facciata)
   M.box("timber", -hw, y0, 0, hw, y0 + 0.18, 0.11); M.box("timber", -hw, y1 - 0.18, 0, hw, y1, 0.11);
-  for (let i = 0; i <= bays; i++) M.box("timber", -hw + i * bw - t, y0, 0, -hw + i * bw + t, y1, 0.1);
-  for (const s of [-1, 1]) M.box("timber", s * (hw - bw / 2) - 0.075, y0 + 0.16 + h / 2 - L / 2, 0, s * (hw - bw / 2) + 0.075, y0 + 0.16 + h / 2 + L / 2, 0.085, { rot: [0, 0, s * a] });
+  for (let i = 0; i <= bays; i++) {
+    const x = -hw + i * bw, g = gaps.find(([gx, gw]) => Math.abs(x - gx) < gw / 2 + 0.12 + t);
+    if (!g) { M.box("timber", x - t, y0, 0, x + t, y1, 0.1); continue; }
+    M.box("timber", x - t, y0, 0, x + t, g[2] - 0.15, 0.1); M.box("timber", x - t, g[3] + 0.19, 0, x + t, y1, 0.1);
+  }
+  for (const s of [-1, 1]) if (!gaps.some(([gx, gw]) => Math.abs(s * (hw - bw / 2) - gx) < gw / 2 + bw / 2 - 0.15)) M.box("timber", s * (hw - bw / 2) - 0.075, y0 + 0.16 + h / 2 - L / 2, 0, s * (hw - bw / 2) + 0.075, y0 + 0.16 + h / 2 + L / 2, 0.085, { rot: [0, 0, s * a] });
 }
 
 /** Le fiamme che di notte fanno luce attorno (lanterne, forgia), nel mondo: da qui si cuoce la luce dei lampioni (`bakeLamps`). */
 const flames: Vector3[] = [];
 
-/** Lanterna a olio: vetri accesi fra un fondo e un cappello di ferro. */
-function lantern(M: Mason, x: number, y: number, z: number): void {
-  flames.push(M.world(x, y + 0.2, z));
-  flame(M.world(x, y + 0.07, z), 0.2, 0.3);   // la fiammella dietro i vetri: il vento la tocca poco
+/** Le lanterne che si accendono e si spengono: il nome, dov'è la fiamma, e quali vertici della mesh dei vetri sono suoi. */
+const LAMPS: { id: string; p: Vector3; a: number; b: number }[] = [];
+/** Lanterna a olio: vetri accesi fra un fondo e un cappello di ferro. `id` = con che nome si accende e si spegne. */
+function lantern(M: Mason, x: number, y: number, z: number, id: string): void {
+  const a = (M.geos.get("lamp")?.c.length ?? 0) / 4;
+  group(id, () => flame(M.world(x, y + 0.07, z), 0.2, 0.3));   // la fiammella dietro i vetri: il vento la tocca poco
   // una gabbia di ferro attorno ai vetri: il fondo, quattro montanti, la cornice, il cappello a punta col suo anello
   M.box("iron", x - 0.13, y, z - 0.13, x + 0.13, y + 0.04, z + 0.13, { under: true });
   M.box("lamp", x - 0.1, y + 0.04, z - 0.1, x + 0.1, y + 0.38, z + 0.1);
@@ -308,27 +662,23 @@ function lantern(M: Mason, x: number, y: number, z: number): void {
   M.box("iron", x - 0.15, y + 0.38, z - 0.15, x + 0.15, y + 0.41, z + 0.15, { under: true });
   M.pyramid("iron", x - 0.19, z - 0.19, x + 0.19, z + 0.19, y + 0.41, y + 0.6);
   M.box("iron", x - 0.02, y + 0.6, z - 0.02, x + 0.02, y + 0.66, z + 0.02);
+  LAMPS.push({ id, p: M.world(x, y + 0.2, z), a, b: M.geos.get("lamp")!.c.length / 4 });
 }
 
-function lamppost(M: Mason, x: number, z: number): void {
+function lamppost(M: Mason, x: number, z: number, id: string): void {
   M.in(x, 0, z, 0, () => {
     // base di pietra a due gradini, fusto di ferro a otto facce con due nodi, la traversa con i riccioli
     M.box("stone", -0.24, 0, -0.24, 0.24, 0.14, 0.24, { tint: DARK }); M.box("stone", -0.17, 0.14, -0.17, 0.17, 0.36, 0.17, { tint: DARK });
-    M.drum("iron", 0, 0, 0.06, 0.36, 2.75, {}, 0.04, 8);
-    for (const yy of [0.5, 1.5, 2.36]) M.drum("iron", 0, 0, 0.075, yy, yy + 0.07, {}, 0.075, 8);
-    M.box("iron", -0.28, 2.42, -0.02, 0.28, 2.46, 0.02);
-    for (const s of [-1, 1]) M.box("iron", s * 0.28 - 0.02, 2.36, -0.02, s * 0.28 + 0.02, 2.52, 0.02);
-    lantern(M, 0, 2.75, 0);
+    M.piece("fusto", 0, 0.36, 0);   // il fusto tornito, coi nodi e il braccio a riccioli (kit)
+    lantern(M, 0, 2.75, 0, id);
     M.line(0, 0, 0, 0, 0.2);
   });
 }
 
 function barrel(M: Mason, x: number, z: number): void {
-  // doghe panciute (quattro tronchi di cono, dodici facce), il coperchio incassato sotto l'orlo, quattro cerchi di ferro
-  const R = [0.29, 0.345, 0.365, 0.345, 0.29], Y = [0, 0.22, 0.45, 0.68, 0.9];
-  for (let i = 0; i < 4; i++) M.drum("wood", x, z, R[i], Y[i], Y[i + 1], { tint: i % 2 ? [0.8, 0.76, 0.7] : undefined }, R[i + 1], 12);
-  M.drum("timber", x, z, 0.265, 0.84, 0.86, {}, 0.265, 12);
-  for (const [y, r] of [[0.06, 0.312], [0.27, 0.357], [0.6, 0.357], [0.81, 0.312]]) M.drum("iron", x, z, r, y, y + 0.045, {}, r, 12);
+  // una botte vera (modello: props.ts), girata a caso ma sempre uguale (dal posto, non da `rnd`)
+  const p = M.world(x, 0, z);
+  prop("wine_barrel_01", p, turn(p), { h: 0.95 });
   M.line(x, z, x, z, 0.36);
 }
 
@@ -337,12 +687,12 @@ function barrel(M: Mason, x: number, z: number): void {
  * di pietra (più larga e più alta del vano di `frame[0]` e `frame[1]`, sporgente `frame[2]`), l'imbotte e la soglia.
  * I battenti stanno dietro, a LIP dal filo del muro (vedi interiors.ts).
  */
-function portal(M: Mason, x0: number, x1: number, h0: number, d: { x: number; w: number; h: number }, frame: V3 = [0.5, 0.3, 0.03], sill = true): void {
+function portal(M: Mason, x0: number, x1: number, h0: number, d: { x: number; w: number; h: number }, frame: V3 = [0.5, 0.3, 0.03], sill = true, holes: number[][] = [], deep = 0): void {
   const { x: cx, w, h } = d, W = w + frame[0], H = h + frame[1], fz = frame[2], n = 5;
   const inner = (g: number, i: number, z = 0): V3 => M.archSide(cx, 0, w, h, z, g, i / n), outer = (g: number, i: number): V3 => M.archSide(cx, 0, W, H, fz, g, i / n);
   for (const g of [-1, 1]) {
     const e = g < 0 ? x0 : x1;
-    M.face("stone", [[cx + g * w / 2, 0, 0], [e, 0, 0], [e, h0, 0], [cx + g * w / 2, h0, 0]], [0, 0, 1]);                                       // il muro ai lati del vano
+    M.wall("stone", Math.min(e, cx + g * w / 2), 0, Math.max(e, cx + g * w / 2), h0, holes.filter((q) => (q[0] - cx) * g > 0), deep);       // il muro ai lati del vano, coi vani delle sue finestre
     M.face("stone", [[cx + g * w / 2, 0, fz], [cx + g * W / 2, 0, fz], outer(g, 0), inner(g, 0, fz)], [0, 0, 1], { tint: DARK });              // la mostra: piedritto
     M.face("stone", [[cx + g * w / 2, 0, -LIP], [cx + g * w / 2, 0, fz], inner(g, 0, fz), inner(g, 0, -LIP)], [-g, 0, 0], { tint: DARK });      // l'imbotte: piedritto
     for (let i = 0; i < n; i++) {
@@ -378,15 +728,15 @@ const wallFace = (M: Mason, k: string, ax: number, az: number, bx: number, bz: n
  * `open` = ci si entra, e con quale interno: un guscio vuoto al posto della scatola piena (l'interno, i muri che fermano
  * il passo e i battenti dell'uscio li fa interiors.ts); la locanda ha anche l'insegna. Restituisce lo yaw con cui è stata posata.
  */
-function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w: number, d: number, kind: 0 | 1 | 2, open?: InteriorId): number {
-  const hw = w / 2, hd = d / 2, lit = (): string => (rnd() < 0.55 ? "lume" : "glass"), inn = open === "locanda";
+function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w: number, d: number, kind: 0 | 1 | 2, open?: InteriorId, scale = 1): number {
+  const hw = w / 2, hd = d / 2, lit = (): string => (rnd(), "lume"), inn = open === "locanda";   // (ogni finestra è un lume: accesa se c'è qualcuno)
   const e = open ? entry((["casa.povera", "casa.graticcio", "casa.ricca"] as const)[kind], w) : null;   // il vano dell'uscio
   // ⚠️ i due numeri a caso si estraggono comunque, in quest'ordine: il resto della città ne dipende
   const a = yaw + (rnd() - 0.5) * 0.05, lean = (rnd() - 0.5) * 0.035;
   M.in(x, 0, z, a, () => {
     if (!e) M.solid(-hw, -hd, hw, hd);
     if (kind === 0) {
-      const rise = d * 0.6;
+      const rise = Math.min(d * 0.6, 4.4);   // (le case larghe non hanno un tetto alto il doppio: la falda si fa più dolce; lo stesso conto in layouts.ts)
       if (e) {   // guscio: tre muri e la facciata col vano dell'uscio (alto quanto serve a chi gioca); niente coperchi, dello zoccolo resta la risega
         const p = hw - 0.06, q = hd - 0.06, a = e.x - e.w / 2, b = e.x + e.w / 2;
         for (const s of [-1, 1]) {
@@ -395,9 +745,9 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
           for (const [u0, u1] of s > 0 ? [[-p, a], [b, p]] : [[-p, p]]) M.face("stone", [[u0, 0.9, s * q], [u1, 0.9, s * q], [u1, 0.9, s * hd], [u0, 0.9, s * hd]], [0, 1, 0]);
           wallFace(M, "stone", e.x + s * e.w / 2, hd - LIP, e.x + s * e.w / 2, hd, 0, 0.9, [-s, 0, 0], { tint: DARK });   // l'imbotte, nello zoccolo
         }
-        wallFace(M, "stone", -hw, -hd, hw, -hd, 0, 0.9, [0, 0, -1]); wallFace(M, "plaster", -p, -q, p, -q, 0.9, 2.7, [0, 0, -1]);
+        wallFace(M, "stone", -hw, -hd, hw, -hd, 0, 0.9, [0, 0, -1]); M.in(0, 0, -q, PI, () => M.wall("plaster", -p, 0.9, p, 2.7, [hole(-hw * 0.3, 1.25, 0.8, 0.7)], DEEP));
         wallFace(M, "stone", -hw, hd, a, hd, 0, 0.9, [0, 0, 1]); wallFace(M, "stone", b, hd, hw, hd, 0, 0.9, [0, 0, 1]);
-        wallFace(M, "plaster", -p, q, a, q, 0.9, 2.7, [0, 0, 1]); wallFace(M, "plaster", b, q, p, q, 0.9, 2.7, [0, 0, 1]); wallFace(M, "plaster", a, q, b, q, e.h, 2.7, [0, 0, 1]);
+        wallFace(M, "plaster", -p, q, a, q, 0.9, 2.7, [0, 0, 1]); M.in(0, 0, q, 0, () => M.wall("plaster", b, 0.9, p, 2.7, [hole(hw * 0.45, 1.25, 0.8, 0.7)], DEEP)); wallFace(M, "plaster", a, q, b, q, e.h, 2.7, [0, 0, 1]);
       } else {
         M.box("stone", -hw, 0, -hd, hw, 0.9, hd);
         M.box("plaster", -hw + 0.06, 0.9, -hd + 0.06, hw - 0.06, 2.7, hd - 0.06);
@@ -406,8 +756,10 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
       M.in(0, 0, hd - 0.05, 0, () => {
         if (e) { M.box("timber", e.x - e.w / 2 - 0.1, e.h, 0, e.x + e.w / 2 + 0.1, e.h + 0.16, 0.1); M.box("stone", e.x - e.w / 2 - 0.2, 0, 0, e.x + e.w / 2 + 0.2, 0.12, 0.45, { tint: DARK }); }   // l'architrave e la soglia
         else door(M, -hw * 0.4, 1.0, 1.75);
-        win(M, hw * 0.45, 1.25, 0.8, 0.7, lit());
+        const k = lit();
+        if (e) M.in(0, 0, -0.01, 0, () => see(() => sash(M, hw * 0.45, 1.25, 0.8, 0.7, k))); else win(M, hw * 0.45, 1.25, 0.8, 0.7, k);
       });
+      if (e) M.in(0, 0, -hd + 0.06, PI, () => see(() => sash(M, -hw * 0.3, 1.25, 0.8, 0.7, "lume"))); else M.in(0, 0, -hd + 0.05, PI, () => win(M, -hw * 0.3, 1.25, 0.8, 0.7, "lume"));   // (sul retro: spenta, così `lit` non estrae un numero in più)
       M.in(0, 0, 0, PI / 2, () => {
         M.roof("thatch", hd, -hw, hw, 2.6, rise, 0.6);
         for (const s of [-1, 1]) M.face("plaster", [[-hd, 2.6, s * (hw - 0.06)], [hd, 2.6, s * (hw - 0.06)], [0, 2.6 + rise, s * (hw - 0.06)]], [0, 0, s]);
@@ -416,17 +768,29 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
       return;
     }
     const h0 = kind === 2 ? 3.3 : 3, j = 0.35, fz = hd + j;
+    const gh = kind === 2 ? [-1, 1].map((s) => [s * w * 0.33 - 0.45, 1.1, s * w * 0.33 + 0.45, 2.5, 1]) : e ? [hole(w * 0.2, 0.95, 1.7, 1.25)] : [];   // i vani delle finestre del piano terra
     if (e) {   // tre muri pieni e la facciata col vano dell'uscio; niente coperchio, che taglierebbe la sala
       for (const s of [-1, 1]) M.face("stone", [[s * hw, 0, -hd], [s * hw, 0, hd], [s * hw, h0, hd], [s * hw, h0, -hd]], [s, 0, 0]);
       M.face("stone", [[-hw, 0, -hd], [hw, 0, -hd], [hw, h0, -hd], [-hw, h0, -hd]], [0, 0, -1]);
-      M.in(0, 0, hd, 0, () => portal(M, -hw, hw, h0, e));
-    } else M.box("stone", -hw, 0, -hd, hw, h0, hd);
+      M.in(0, 0, hd, 0, () => portal(M, -hw, hw, h0, e, undefined, undefined, gh, DEEP));
+    } else { M.box("stone", -hw, 0, -hd, hw, h0, hd, { noFront: true }); M.in(0, 0, hd, 0, () => M.wall("stone", -hw, 0, hw, h0, gh, DEEP)); }
     let y = h0;
     if (kind === 2) {   // piano nobile in pietra e intonaco
       if (e) ring(M, hw + 0.08, hd + 0.08, y, y + 0.22, 0.12);        // il marcapiano come cornice: dentro ci passa il solaio
       else M.box("stone", -hw - 0.08, y, -hd - 0.08, hw + 0.08, y + 0.22, hd + 0.08, { tint: DARK, under: true });
-      M.box("plaster", -hw + 0.04, y + 0.22, -hd + 0.04, hw - 0.04, y + 3.2, hd - 0.04, { open: !!e });
-      M.in(0, 0, hd - 0.03, 0, () => { for (const s of [-1, 0, 1]) win(M, s * w * 0.3, y + 0.9, 1, 1.9, lit(), true); });
+      M.box("plaster", -hw + 0.04, y + 0.22, -hd + 0.04, hw - 0.04, y + 3.2, hd - 0.04, { open: !!e, noFront: true, noSides: !!e });
+      M.in(0, 0, hd - 0.04, 0, () => {   // (l'intonaco sta già 4 cm dentro la pietra: il vetro scende di altri 5)
+        M.wall("plaster", -hw + 0.04, y + 0.22, hw - 0.04, y + 3.2, [-1, 0, 1].map((s) => [s * w * 0.3 - 0.5, y + 0.9, s * w * 0.3 + 0.5, y + 2.8, 1]), 0.05);
+        for (const s of [-1, 0, 1]) see(() => win(M, s * w * 0.3, y + 0.9, 1, 1.9, lit(), true, 0.05));
+      });
+      if (e) {   // ci si entra: anche retro e fianchi hanno vani veri, alle stesse misure di quelli della pianta
+        const vano = (x: number): number[] => [x - 0.5, y + 0.9, x + 0.5, y + 2.8, 1];
+        M.in(0, 0, -hd + 0.04, PI, () => { M.wall("plaster", -hw + 0.04, y + 0.22, hw - 0.04, y + 3.2, [-1, 1].map((s) => vano(s * w * 0.25)), 0.05); for (const s of [-1, 1]) see(() => win(M, s * w * 0.25, y + 0.9, 1, 1.9, "lume", true, 0.05)); });
+        for (const s of [-1, 1]) M.in(s * (hw - 0.04), 0, 0, s * PI / 2, () => { M.wall("plaster", -hd + 0.04, y + 0.22, hd - 0.04, y + 3.2, [vano(0)], 0.05); see(() => win(M, 0, y + 0.9, 1, 1.9, "lume", true, 0.05)); });
+      } else {
+        M.in(0, 0, -hd + 0.03, PI, () => { for (const s of [-1, 1]) win(M, s * w * 0.25, y + 0.9, 1, 1.9, "lume", true); });
+        for (const s of [-1, 1]) M.in(s * (hw - 0.03), 0, 0, s * PI / 2, () => win(M, 0, y + 0.9, 1, 1.9, "lume", true));
+      }
       y += 3.2;
     }
     // piano a graticcio, in aggetto sulla strada
@@ -439,24 +803,42 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
     // le teste dei travetti che reggono lo sbalzo, e i cantonali di pietra del piano terra
     for (let i = 0, n = Math.round(w / 0.75); i <= n; i++) M.box("timber", -hw + i * w / n - 0.08, y - 0.02, fz - 0.1, -hw + i * w / n + 0.08, y + 0.17, fz + 0.24, { under: true });
     for (const sx of [-1, 1]) for (const sz of [-1, 1]) quoins(M, sx * hw, sz * hd, sx, sz, h0);
-    M.box("plaster", -hw - 0.05, y1, -hd, hw + 0.05, y2, fz);
-    M.in(0, 0, fz, 0, () => { frame(M, w + 0.1, y1, y2, kind === 2 ? 5 : 4); for (const s of [-1, 1]) win(M, s * w * 0.19, y1 + 0.85, 0.95, 1.25, lit()); });
-    for (const s of [-1, 1]) M.in(s * (hw + 0.05), 0, j / 2, s * PI / 2, () => frame(M, d + j, y1, y2, 3));
-    M.in(0, 0, -hd, PI, () => frame(M, w + 0.1, y1, y2, 3));
+    const thruUp = !!e && kind === 1;
+    SHUT = !!e && kind === 2;
+    M.box("plaster", -hw - 0.05, y1, -hd, hw + 0.05, y2, fz, { noFront: true, noSides: thruUp });
+    /** La finestra di mezzo di un fianco o del retro, lungo `len`. */
+    const mezzo = (len: number): void => {
+      if (!thruUp) { win(M, 0, y1 + 0.85, 0.95, 1.25, "lume"); return; }
+      M.wall("plaster", -len / 2, y1, len / 2, y2, [hole(0, y1 + 0.85, 0.95, 1.25)], DEEP);
+      see(() => sash(M, 0, y1 + 0.85, 0.95, 1.25, "lume"));
+    };
+    M.in(0, 0, fz, 0, () => {   // la facciata coi vani veri: le finestre stanno DENTRO il muro
+      // (una facciata larga ha quattro finestre e il doppio delle campate; le due in più sono spente: `lit` estrae solo per le prime)
+      const fx = w > 10 ? [-0.38, -0.19, 0.19, 0.38] : [-0.19, 0.19];
+      M.wall("plaster", -hw - 0.05, y1, hw + 0.05, y2, fx.map((f) => hole(f * w, y1 + 0.85, 0.95, 1.25)), DEEP);
+      frame(M, w + 0.1, y1, y2, (kind === 2 ? 5 : 4) * (w > 10 ? 2 : 1), fx.map((f) => [f * w, 0.95, y1 + 0.85, y1 + 2.1]));
+      for (const s of [-1, 1]) { const k = lit(); if (kind === 1) see(() => sash(M, s * w * 0.19, y1 + 0.85, 0.95, 1.25, k)); else sash(M, s * w * 0.19, y1 + 0.85, 0.95, 1.25, k); }
+      if (w > 10) for (const s of [-1, 1]) sash(M, s * w * 0.38, y1 + 0.85, 0.95, 1.25, "lume");
+    });
+    // (fianchi e retro: una finestra nella campata di mezzo, sempre spenta: `lit` non deve estrarre numeri in più)
+    const mid = [[0, 0.95, y1 + 0.85, y1 + 2.1]];
+    for (const s of [-1, 1]) M.in(s * (hw + 0.05), 0, j / 2, s * PI / 2, () => { frame(M, d + j, y1, y2, Math.round((d + j) / 2.7), mid); mezzo(d + j); });
+    M.in(0, 0, -hd, PI, () => { frame(M, w + 0.1, y1, y2, Math.round(w / 2.3), mid); mezzo(w + 0.1); });
+    SHUT = false;
     // piano terra: porta e bottega
     M.in(0, 0, hd, 0, () => {
       if (!e) door(M, kind === 2 ? 0 : -w * 0.24, kind === 2 ? 1.7 : 1.15, kind === 2 ? 2.5 : 2.1, true);
-      if (kind === 2) for (const s of [-1, 1]) win(M, s * w * 0.33, 1.1, 0.9, 1.4, "glass", true);
-      else { win(M, w * 0.2, 0.95, 1.7, 1.25, "lume"); M.box("wood", w * 0.2 - 1, 0.82, 0, w * 0.2 + 1, 0.9, 0.4); }
+      if (kind === 2) for (const s of [-1, 1]) see(() => win(M, s * w * 0.33, 1.1, 0.9, 1.4, "lume", true, DEEP));
+      else { if (e) see(() => sash(M, w * 0.2, 0.95, 1.7, 1.25, "lume", false)); else win(M, w * 0.2, 0.95, 1.7, 1.25, "lume"); M.box("wood", w * 0.2 - 1, 0.82, 0, w * 0.2 + 1, 0.9, 0.4); }
       if (inn) {   // l'insegna della locanda, su un braccio di ferro
         M.box("iron", hw * 0.62 - 0.03, 3.05, 0, hw * 0.62 + 0.03, 3.11, 1.25);
         M.box("wood", hw * 0.62 - 0.04, 2.25, 0.45, hw * 0.62 + 0.04, 2.95, 1.2);
         for (const s of [-1, 1]) M.box("cloth", hw * 0.62 + s * 0.045, 2.42, 0.66, hw * 0.62 + s * 0.05, 2.78, 1.0, { tint: OCRA });
-        lantern(M, -hw * 0.62, 2.3, 0.5); M.box("iron", -hw * 0.62 - 0.02, 2.86, 0, -hw * 0.62 + 0.02, 2.9, 0.6);
+        lantern(M, -hw * 0.62, 2.3, 0.5, "locanda"); M.box("iron", -hw * 0.62 - 0.02, 2.86, 0, -hw * 0.62 + 0.02, 2.9, 0.6);
       }
     });
     if (kind === 1) {   // timpano sulla strada
-      const rise = w * 0.66;
+      const rise = Math.min(w * 0.66, 6.2);
       M.roof("slate", hw + 0.05, -hd, fz, y2, rise);
       M.face("plaster", [[-hw - 0.05, y2, fz], [hw + 0.05, y2, fz], [0, y2 + rise, fz]], [0, 0, 1]);
       M.face("plaster", [[-hw - 0.05, y2, -hd], [hw + 0.05, y2, -hd], [0, y2 + rise, -hd]], [0, 0, -1]);
@@ -466,37 +848,82 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
       });
       chimney(M, -hw * 0.5, y2 + rise * 0.3, -hd + 0.6, -hw * 0.5 + 0.7, y2 + rise + 0.6, -hd + 1.3);
     } else {            // gronda sulla strada
-      const rise = d * 0.56;
+      const rise = Math.min(d * 0.56, 6);
       M.in(0, 0, j / 2, PI / 2, () => {
         M.roof("slate", hd + j / 2, -hw - 0.05, hw + 0.05, y2, rise);
         for (const s of [-1, 1]) M.face("plaster", [[-hd - j / 2, y2, s * (hw + 0.05)], [hd + j / 2, y2, s * (hw + 0.05)], [0, y2 + rise, s * (hw + 0.05)]], [0, 0, s]);
       });
       for (const s of [-1, 1]) chimney(M, s * hw * 0.72 - 0.4, y2, -0.4, s * hw * 0.72 + 0.4, y2 + rise + 1.3, 0.4);
     }
-  }, e ? 0 : lean);   // dove si entra i pavimenti sono in piano: niente fuori piombo (ma il numero a caso si estrae lo stesso)
+  }, e ? 0 : lean, scale);   // dove si entra i pavimenti sono in piano: niente fuori piombo (ma il numero a caso si estrae lo stesso)
   return a;
 }
 
-export function createTown(scene: Scene, def: LocationDef): Town {
-  const rnd = mulberry32(0x70A1), M = new Mason(), { hx, hz } = TOWN, rad = (deg: number): number => deg * PI / 180;
-  flames.length = 0;
-  const lit = (): string => (rnd() < 0.5 ? "lume" : "glass");
+/** Un numero stabile da un elemento che non ha ancora la sua `variant` (chi lo aggiunge a mano nel file): dal tipo e dal posto. */
+const variantOf = (c: ChildDef): number => c.variant ?? [...`${c.prefab}${c.at[0]},${c.at[1]}`].reduce((h, ch) => (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0, 11);
+
+/**
+ * Un oggetto teso fra due capi (festoni, panni: `SPANS` in db.ts), nel riferimento della città. Si popola in base alla
+ * lunghezza: una bandierina ogni 55 cm, i panni finché c'è corda. La corda fa la pancia, più profonda se è più lunga, e i
+ * capi possono stare a quote diverse.
+ */
+function span(M: Mason, c: ChildDef): void {
+  const [ax, ay, az] = c.from!, [bx, by, bz] = c.to!, len = Math.hypot(bx - ax, bz - az), sag = Math.min(0.9, 0.05 * len + 0.08);
+  const yAt = (t: number): number => ay + (by - ay) * t - sag * (1 - (2 * t - 1) ** 2), cord = (x0: number, x1: number, t0: number, t1: number): void => {
+    const y0 = yAt(t0), y1 = yAt(t1), my = (y0 + y1) / 2;
+    M.box("timber", x0 - 0.01, my - 0.012, -0.012, x1 + 0.01, my + 0.012, 0.012, { rot: [0, 0, Math.atan2(y1 - y0, x1 - x0)], under: true });
+  };
+  M.in(ax, 0, az, Math.atan2(-(bz - az), bx - ax), () => {   // (lungo la sua x locale, da 0 a `len`)
+    if (c.prefab === "festone") {
+      const n = Math.max(1, Math.round(len / 0.55)), TINTS = [VINO, OCRA, LINO, MUSCHIO];
+      for (let i = 0; i < n; i++) {
+        const x0 = i / n * len, x1 = (i + 1) / n * len, top = (yAt(i / n) + yAt((i + 1) / n)) / 2;
+        cord(x0, x1, i / n, (i + 1) / n);
+        M.poly("cloth", [[x0 + 0.06, top, 0], [x1 - 0.06, top, 0], [(x0 + x1) / 2, top - 0.42, 0]], [0, 0, 1], { tint: TINTS[i % 4], wave: (p) => (top - p[1]) / 0.42 });
+      }
+      return;
+    }
+    // panni: la corda a tratti (fa la pancia), poi il bucato finché c'è posto, ognuno appeso dove la corda passa
+    const steps = Math.max(2, Math.round(len / 0.5));
+    for (let i = 0; i < steps; i++) cord(i / steps * len, (i + 1) / steps * len, i / steps, (i + 1) / steps);
+    const PANNI: [number, number, Tint][] = [[0.9, 1.1, BIANCO], [0.5, 0.7, LINO], [1.1, 0.9, BIANCO], [0.45, 0.6, OCRA], [0.7, 1, LINO], [0.5, 0.55, VINO]];
+    for (let i = 0, x = 0.4; ; i++) {
+      const [w, h, tint] = PANNI[i % PANNI.length];
+      if (x + w > len - 0.4) break;
+      const top = yAt((x + w / 2) / len);
+      drape(M, x, top - h, x + w, top, 0, tint); x += w + 0.25;
+    }
+  });
+}
+
+export function createTown(scene: Scene, def: LocationDef, opts: { editor?: boolean } = {}): Town {
+  // (ogni elemento del file estrae dal suo seme, `variant`; questo resta per ciò che non è un elemento: mura, porta, selciati)
+  let rnd = mulberry32(0x70A1);
+  // (un `let`: l'editor costruisce un elemento da solo, `build`, scambiando il muratore; i generatori leggono questo)
+  let M = new Mason();
+  const { hx, hz } = TOWN, rad = (deg: number): number => deg * PI / 180;
+  flames.length = 0; LAMPS.length = 0;
+  let posts = 0;   // i lampioni si chiamano `lampione.N` nell'ordine del file
+  // (ogni finestra è un lume: accesa o spenta lo decide chi c'è dentro, non un numero a caso; il numero si estrae lo stesso)
+  const lit = (): string => (rnd(), "lume");
   /** Gli edifici in cui si entra: quale interno, dove sta, come è girato, ingombro e seme della pianta. Si costruiscono dopo le mesh della città. */
-  const sites: { id: string; kind: InteriorId; x: number; z: number; yaw: number; size: [number, number]; seed: number }[] = [];
+  const sites: { id: string; kind: InteriorId; x: number; z: number; yaw: number; size: [number, number]; seed: number; scale: number }[] = [];
   /** I pezzi di rete degli abitanti che vengono dagli interni (nodi con quota, collegamenti, posti): il nodo 0 di ognuno sta in strada. */
   const plans: Pick<Built, "nodes" | "links" | "spots">[] = [];
-  const enter = (c: ChildDef, yaw: number, size: [number, number]): void => { if (c.interior) sites.push({ id: c.id!, kind: c.interior, x: c.at[0], z: c.at[1], yaw, size, seed: seedOf(c) }); };
+  const enter = (c: ChildDef, yaw: number, size: [number, number]): void => { if (c.interior) sites.push({ id: c.id!, kind: c.interior, x: c.at[0], z: c.at[1], yaw, size, seed: seedOf(c), scale: c.scale }); };
   /** Esegue `f` nel riferimento di una cosa posata. */
-  const place = (c: ChildDef, f: () => void): void => M.in(c.at[0], 0, c.at[1], rad(c.yaw), f);
+  const place = (c: ChildDef, f: () => void): void => M.in(c.at[0], 0, c.at[1], rad(c.yaw), f, 0, c.scale);
   // le finestre accese di ogni casa con un nome: quali vertici della mesh dei lumi sono suoi (da, a), per accenderle e spegnerle (`windows`)
+  const glow = new Map<string, { x: number; y: number; z: number }[]>();   // per edificio: dove cade sulla strada la luce delle sue finestre
+  const thru = new Map<string, number[]>();   // per edificio: i vertici dei lumi che stanno dietro un vetro trasparente (da, a, da, a…)
   const homes = new Map<string, [number, number]>(), lumes = (): number => (M.geos.get("lume")?.c.length ?? 0) / 4;
-  const casa = (kind: 0 | 1 | 2) => (c: ChildDef): void => {
-    const from = lumes();
-    enter(c, house(M, rnd, c.at[0], c.at[1], rad(c.yaw), c.size![0], c.size![1], kind, c.interior), c.size!);
-    if (c.id) homes.set(c.id, [from, lumes()]);
-  };
+  const casa = (kind: 0 | 1 | 2) => (c: ChildDef): void => enter(c, house(M, rnd, c.at[0], c.at[1], rad(c.yaw), c.size![0], c.size![1], kind, c.interior, c.scale), c.size!);
   const TELI: Record<string, Tint> = { vino: VINO, ocra: OCRA, muschio: MUSCHIO };
   const PAVING = { lastre: ["flag", 0.04], "lastre.diagonali": ["flag", 0.045], cubetti: ["sett", 0.05], ciottoli: ["cobble", 0.03] } as const;
+  /** I generatori, uno per tipo (si riempie dentro il riferimento della città; `build` li riusa). */
+  let PREFABS = {} as Record<PrefabId, (c: ChildDef) => void>;
+  /** Posa i selciati (nel riferimento della città). */
+  let layPaving: (list: LocationDef["paving"]) => void = () => {};
 
   M.in(TOWN.x, TOWN.y, TOWN.z, 0, () => {
     // ── selciati: ognuno a una quota appena diversa, così dove si sovrappongono non sfarfallano ──
@@ -504,34 +931,43 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       const pts: V3[] = [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]];
       M.poly(k, pts, [0, 1, 0], diag ? { uv: 2.2 } : {}, diag ? pts.map(([x, , z]) => [(x - z) * 0.707, 0, (x + z) * 0.707] as V3) : pts);
     };
-    const laid: Record<string, number> = {};
-    for (const p of def.paving) {
-      const [[ax, az], [bx, bz]] = p.line, h = p.width / 2, [k, y] = PAVING[p.kind], n = laid[p.kind] = (laid[p.kind] ?? -1) + 1;
-      // ogni striscia dello stesso selciato sta 2 mm sopra la precedente
-      if (az === bz) pave(k, Math.min(ax, bx), az - h, Math.max(ax, bx), az + h, y + n * 0.002, p.kind === "lastre.diagonali");
-      else pave(k, ax - h, Math.min(az, bz), ax + h, Math.max(az, bz), y + n * 0.002, p.kind === "lastre.diagonali");
-    }
+    layPaving = (list) => {
+      const laid: Record<string, number> = {};
+      for (const p of list) {
+        const [[ax, az], [bx, bz]] = p.line, h = p.width / 2, [k, y] = PAVING[p.kind], n = laid[p.kind] = (laid[p.kind] ?? -1) + 1;
+        // ogni striscia dello stesso selciato sta 2 mm sopra la precedente
+        if (az === bz) pave(k, Math.min(ax, bx), az - h, Math.max(ax, bx), az + h, y + n * 0.002, p.kind === "lastre.diagonali");
+        else pave(k, ax - h, Math.min(az, bz), ax + h, Math.max(az, bz), y + n * 0.002, p.kind === "lastre.diagonali");
+      }
+    };
+    // (in modalità editor i selciati nelle loro mesh, `#selciati`: si rifanno da soli quando li si ridisegna)
+    M.tag = opts.editor ? "#selciati" : ""; layPaving(def.paving); M.tag = "";
 
     // ── mura, torri d'angolo, porta ──
     const wall = (x0: number, z0: number, x1: number, z1: number, trim0 = 0, trim1 = 0): void => {
       const ew = z0 === z1, t = 0.8, n = Math.floor(Math.hypot(x1 - x0, z1 - z0) / 2.4);
-      M.box("stone", Math.min(x0, x1) - (ew ? 0 : t), 0, Math.min(z0, z1) - (ew ? t : 0), Math.max(x0, x1) + (ew ? 0 : t), 8, Math.max(z0, z1) + (ew ? t : 0));
+      const X0 = Math.min(x0, x1) - (ew ? 0 : t), Z0 = Math.min(z0, z1) - (ew ? t : 0), X1 = Math.max(x0, x1) + (ew ? 0 : t), Z1 = Math.max(z0, z1) + (ew ? t : 0), a = ew ? 0 : 0.16, b = ew ? 0.16 : 0;
+      M.box("stone", X0, 0, Z0, X1, 8, Z1);
+      M.box("stone", X0 - a, 0, Z0 - b, X1 + a, 1.1, Z1 + b, { tint: DARK });                       // lo zoccolo
+      M.box("stone", X0 - a, 7.5, Z0 - b, X1 + a, 7.8, Z1 + b, { tint: DARK, under: true });        // il cordolo sotto i merli
       for (let i = 0; i < n; i++) {
-        const k = (i + 0.5) / n, x = x0 + (x1 - x0) * k, z = z0 + (z1 - z0) * k;
-        M.box("stone", x - (ew ? 0.7 : t), 8, z - (ew ? t : 0.7), x + (ew ? 0.7 : t), 9, z + (ew ? t : 0.7));
+        const k = (i + 0.5) / n, x = x0 + (x1 - x0) * k, z = z0 + (z1 - z0) * k, mx = ew ? 0.7 : t, mz = ew ? t : 0.7;
+        M.box("stone", x - mx, 8, z - mz, x + mx, 9, z + mz);
+        M.box("stone", x - mx - 0.06, 9, z - mz - 0.06, x + mx + 0.06, 9.14, z + mz + 0.06, { tint: DARK, under: true });   // la cimasa del merlo
       }
       const l = Math.hypot(x1 - x0, z1 - z0), ux = (x1 - x0) / l, uz = (z1 - z0) / l;
       M.line(x0 + ux * trim0, z0 + uz * trim0, x1 - ux * trim1, z1 - uz * trim1, t);
     };
     // ⚠️ i cerchi delle mura fermano a ogni quota: dove toccano la porta, se dentro ci si sale, vanno tenuti fuori dalle sue torri
-    const guard = def.gate?.interior ? def.gate : null, trim = guard ? 0.8 : 0;
-    wall(-hx, -hz, -hx, -5, 0, trim); wall(-hx, 5, -hx, hz, trim, 0); wall(-hx, hz, hx, hz); wall(hx, hz, hx, -hz); wall(hx, -hz, -hx, -hz);
+    const guard = def.gate?.interior ? def.gate : null, trim = guard ? 0.8 : 0, gk = def.gate?.scale ?? 1;   // (la porta ingrandita: le mura la raggiungono più in là)
+    wall(-hx, -hz, -hx, -5 * gk, 0, trim); wall(-hx, 5 * gk, -hx, hz, trim, 0); wall(-hx, hz, hx, hz); wall(hx, hz, hx, -hz); wall(hx, -hz, -hx, -hz);
     for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
       M.box("stone", sx * hx - 2.5, 0, sz * hz - 2.5, sx * hx + 2.5, 11, sz * hz + 2.5);
+      for (const y of [0, 5.6, 10.6]) M.box("stone", sx * hx - 2.64, y, sz * hz - 2.64, sx * hx + 2.64, y + (y ? 0.32 : 1.3), sz * hz + 2.64, { tint: DARK, under: true });   // zoccolo e marcapiani
       M.pyramid("slate", sx * hx - 2.9, sz * hz - 2.9, sx * hx + 2.9, sz * hz + 2.9, 11, 15.5);
       M.solid(sx * hx - 2.5, sz * hz - 2.5, sx * hx + 2.5, sz * hz + 2.5, 0.8);
     }
-    if (guard) sites.push({ id: guard.id, kind: "porta", x: -hx, z: 0, yaw: PI / 2, size: [10, 5.2], seed: seedOf(guard) });   // (la pianta guarda la città: mezzo giro rispetto alla porta)
+    if (guard) sites.push({ id: guard.id, kind: "porta", x: -hx, z: 0, yaw: PI / 2, size: [10, 5.2], seed: seedOf(guard), scale: gk });   // (la pianta guarda la città: mezzo giro rispetto alla porta)
     M.in(-hx, 0, 0, -PI / 2, () => {   // la porta: il fuori è a +Z
       for (const s of [-1, 1]) {
         const x0 = s * 3.6 - 1.4, x1 = s * 3.6 + 1.4, xi = s < 0 ? x1 : x0, xo = s < 0 ? x0 : x1;
@@ -547,19 +983,20 @@ export function createTown(scene: Scene, def: LocationDef): Town {
         for (const f of [-1, 1]) wallFace(M, "stone", -2.2, f * 2.6, 2.2, f * 2.6, 5, 14, [0, 0, f]);
         for (const [yy, up] of [[5, -1], [14, 1]]) M.face("stone", [[-2.2, yy, -2.6], [2.2, yy, -2.6], [2.2, yy, 2.6], [-2.2, yy, 2.6]], [0, up, 0]);
       } else M.box("stone", -2.2, 5, -2.6, 2.2, 14, 2.6, { under: true });
+      for (const s of [-1, 1]) for (const f of [-1, 1]) quoins(M, s * 5, f * 2.6, s, f, 12.4);                         // i cantonali delle torri
       for (let i = -3; i <= 3; i++) M.box("iron", i * 0.6 - 0.04, 3.9, 2.2, i * 0.6 + 0.04, 5, 2.3, { under: true });   // la saracinesca, a metà
       M.box("iron", -2.2, 4.4, 2.2, 2.2, 4.48, 2.3, { under: true });
       M.box("stone", -5.4, 12.4, -3, 5.4, 14.2, 3, { under: true, tint: DARK });                                         // caditoie
       for (let i = -2; i <= 2; i++) for (const s of [-1, 1]) M.box("stone", i * 2.2 - 0.6, 14.2, s * 2.75 - 0.25, i * 2.2 + 0.6, 15.2, s * 2.75 + 0.25, { tint: DARK });
       M.in(0, 0, 0, 0, () => M.hip("slate", 5.8, 3.4, 15, 4.4));
       for (const f of [-1, 1]) M.in(0, 0, f * 2.61, f > 0 ? 0 : PI, () => {
-        for (const s of [-1, 1]) { M.box("cloth", s * 3.6 - 0.45, 6.6, 0, s * 3.6 + 0.45, 11.4, 0.05, { tint: VINO }); lantern(M, s * 2.75, 3.3, 0.3); M.box("iron", s * 2.75 - 0.02, 3.86, 0, s * 2.75 + 0.02, 3.9, 0.4); }
-        M.box("cloth", -0.6, 6.4, 0, 0.6, 7.9, 0.05, { tint: VINO }); M.disc("cloth", 0, 7.15, 0.3, 0.07, { tint: ORO });
+        for (const s of [-1, 1]) { drape(M, s * 3.6 - 0.45, 6.6, s * 3.6 + 0.45, 11.4, 0.04, VINO, 0.5); M.box("iron", s * 3.6 - 0.55, 11.4, 0, s * 3.6 + 0.55, 11.46, 0.07, { under: true }); lantern(M, s * 2.75, 3.3, 0.3, "lampione.porta"); M.box("iron", s * 2.75 - 0.02, 3.86, 0, s * 2.75 + 0.02, 3.9, 0.4); }
+        drape(M, -0.6, 6.4, 0.6, 7.9, 0.04, VINO, 0.3); M.disc("cloth", 0, 7.15, 0.3, 0.07, { tint: ORO, wave: (p) => (7.9 - p[1]) / 1.8 });
       });
-    });
+    }, 0, gk);
 
     // ── i generatori: una chiave del file, una funzione. Ognuno lavora nel riferimento della cosa (facciata a +Z) ──
-    const PREFABS: Record<PrefabId, (c: ChildDef) => void> = {
+    PREFABS = {
     "casa.povera": casa(0), "casa.graticcio": casa(1), "casa.ricca": casa(2),
 
     // cattedrale: la torre a destra di chi la guarda ha la guglia, l'altra non è mai stata finita
@@ -568,13 +1005,19 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       enter(c, rad(c.yaw), [19, 29]);
       if (open) {   // guscio: la navata senza coperchio; dei muri di testa resta ciò che si vede da fuori (il resto è dietro torri, facciata e abside, e dentro lo fa l'interno)
         for (const s of [-1, 1]) {
-          wallFace(M, "stone", s * 6.5, -L, s * 6.5, 5.5, 0, 11, [s, 0, 0]);
+          // il muro della navata coi vani delle quattro bifore (lungo il muro, x locale = s · (centro − z))
+          const zc = (5.5 - L) / 2, vani = [0, 1, 2, 3].map((i) => s * (zc - (-L + 3.35 + i * 4.3))).sort((a, b) => a - b).map((x) => [x - 0.575, 3.4, x + 0.575, 8, 1]);
+          M.in(s * 6.5, 0, zc, s * PI / 2, () => M.wall("stone", -(5.5 + L) / 2, 0, (5.5 + L) / 2, 11, vani, 0.3));
           wallFace(M, "stone", s * 4, -L, s * 6.5, -L, 0, 11, [0, 0, -1]); wallFace(M, "stone", s * 3.5, 5.5, s * 6.5, 5.5, 0, 11, [0, 0, 1]);
-          wallFace(M, "stone", s * 4, -L - 3, s * 4, -L, 0, 8, [s, 0, 0]);
+          M.in(s * 4, 0, -L - 1.5, s * PI / 2, () => M.wall("stone", -1.5, 0, 1.5, 8, [[-0.45, 2.4, 0.45, 6.6, 1]], 0.2));
         }
         wallFace(M, "stone", -4, -L, 4, -L, 8, 11, [0, 0, -1]); wallFace(M, "stone", -3.5, 5.5, 3.5, 5.5, 7.5, 11, [0, 0, 1]);
-        wallFace(M, "stone", -4, -L - 3, 4, -L - 3, 0, 8, [0, 0, -1]); M.face("stone", [[-4, 8, -L - 3], [4, 8, -L - 3], [4, 8, -L], [-4, 8, -L]], [0, 1, 0]);
+        M.in(0, 0, -L - 3, PI, () => M.wall("stone", -4, 0, 4, 8, [[-0.55, 2.4, 0.55, 6.8, 1]], 0.2)); M.face("stone", [[-4, 8, -L - 3], [4, 8, -L - 3], [4, 8, -L], [-4, 8, -L]], [0, 1, 0]);
       } else { M.box("stone", -6.5, 0, -L, 6.5, 11, 5.5); M.solid(-6.5, -L, 6.5, 5.5, 0.7); M.box("stone", -4, 0, -L - 3, 4, 8, -L); M.solid(-4, -L - 3, 4, -L, 0.7); }
+      // l'abside: tre bifore, lo zoccolo, la cornice sotto il tetto, i contrafforti d'angolo
+      M.in(0, 0, -L - 3.02, PI, () => { if (open) see(() => lancet(M, 0, 2.4, 1.1, 4.4, "lume", 0.24, 0.2)); else lancet(M, 0, 2.4, 1.1, 4.4, "lume"); for (const s of [-1, 1]) M.in(s * 3.4, 0, 0, 0, () => buttress(M, 6.2)); });
+      for (const s of [-1, 1]) M.in(s * 4.02, 0, -L - 1.5, s * PI / 2, () => { if (open) see(() => lancet(M, 0, 2.4, 0.9, 4.2, "lume", 0.24, 0.2)); else lancet(M, 0, 2.4, 0.9, 4.2, "lume"); });
+      M.box("stone", -4.14, 0, -L - 3.14, 4.14, 0.9, -L, { tint: DARK }); M.box(TRIM, -4.16, 7.7, -L - 3.16, 4.16, 8, -L, { tint: GOLA, under: true });
       M.roof("slate", 6.5, -L, 5.5, 11, 6, 0.5);
       M.face("stone", [[-6.5, 11, -L], [6.5, 11, -L], [0, 17, -L]], [0, 0, -1]);
       if (open) {   // il tetto dell'abside entra nel muro della navata: di quel che sta oltre il muro (dentro la navata) resta solo ciò che l'interno copre
@@ -587,18 +1030,22 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       } else M.pyramid("slate", -4.3, -L - 3.3, 4.3, -L + 1.5, 8, 11.5);   // abside
       for (let i = 0; i < 4; i++) for (const s of [-1, 1]) {
         const z = -L + 1.2 + i * 4.3;
-        M.box("stone", s > 0 ? 6.5 : -7.4, 0, z - 0.45, s > 0 ? 7.4 : -6.5, 8.6, z + 0.45, { tint: DARK });   // contrafforti
-        M.in(s * 6.52, 0, z + 2.15, s * PI / 2, () => M.arch("glass", 0, 3.4, 1.15, 4.6, 0));
+        M.in(s * 6.5, 0, z, s * PI / 2, () => buttress(M, 8));                                   // contrafforti a riseghe, con la guglia
+        M.in(s * 6.52, 0, z + 2.15, s * PI / 2, () => { if (open) see(() => lancet(M, 0, 3.4, 1.15, 4.6, "lume", 0.24, 0.3)); else lancet(M, 0, 3.4, 1.15, 4.6, "lume"); });    // le bifore della navata
       }
       for (const s of [-1, 1]) {   // s = +1 torre nord, −1 torre sud
         const top = s > 0 ? 20 : 17, cx = s * 6.5;
         M.box("stone", cx - 3, 0, 5.5, cx + 3, top, L); M.solid(cx - 3, 5.5, cx + 3, L, 0.7);
         for (const y of [7, 13.5, top]) M.box("stone", cx - 3.14, y, 5.36, cx + 3.14, y + (y === top ? 0.6 : 0.3), L + 0.14, { tint: DARK, under: true });
-        M.in(cx, 0, L + 0.02, 0, () => { door(M, 0, 1.5, 3, true); M.arch("glass", 0, 8.2, 0.9, 3.8, 0); for (const q of [-1, 1]) M.arch("dark", q, top - 5.2, 1.1, 4.2, 0); });
-        M.in(cx + s * 3.02, 0, 8.5, s * PI / 2, () => { M.arch("glass", 0, 8.2, 0.9, 3.8, 0); for (const q of [-1, 1]) M.arch("dark", q, top - 5.2, 1.1, 4.2, 0); });
+        // (ai piedi delle torri c'erano due portoncini che non portavano da nessuna parte: ora una bifora alta, come di sopra)
+        M.in(cx, 0, L + 0.02, 0, () => { lancet(M, 0, 1.5, 1.5, 4.3, "glass", 0.3); lancet(M, 0, 8.2, 0.9, 3.8, "glass"); for (const q of [-1, 1]) lancet(M, q, top - 5.2, 1.1, 4.2, "dark"); });
+        M.in(cx + s * 3.02, 0, 8.5, s * PI / 2, () => { lancet(M, 0, 8.2, 0.9, 3.8, "glass"); for (const q of [-1, 1]) lancet(M, q, top - 5.2, 1.1, 4.2, "dark"); });
+        for (const q of [-1, 1]) quoins(M, cx + q * 3, L, q, 1, top);
+        quoins(M, cx + s * 3, 5.5, s, -1, top);
+        M.box("stone", cx - 3.12, 0, 5.38, cx + 3.12, 0.9, L + 0.12, { tint: DARK });   // lo zoccolo
       }
       M.pyramid("slate", 3.3, 5.3, 9.7, L + 0.2, 20.6, 33.5);
-      for (const [px, pz] of [[3.6, 5.6], [9.4, 5.6], [3.6, L - 0.1], [9.4, L - 0.1]]) M.pyramid("stone", px - 0.45, pz - 0.45, px + 0.45, pz + 0.45, 20.6, 23.4, { tint: DARK });
+      for (const [px, pz] of [[3.6, 5.6], [9.4, 5.6], [3.6, L - 0.1], [9.4, L - 0.1]]) M.piece("guglia", px, 20.6, pz, { size: [2.1, 1.5, 2.1], as: TRIM, tint: LISCIA });
       M.box("iron", 6.47, 33.3, 8.47, 6.53, 34.3, 8.53); M.in(6.5, 0, 8.5, 0, () => M.disc("cloth", 0, 34.6, 0.34, 0, { tint: ORO }));
       // torre sud: tetto provvisorio di assi, ponteggio e argano
       M.pyramid("wood", -9.8, 5.2, -3.2, L + 0.3, 17.6, 20.2);
@@ -614,13 +1061,21 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       M.face("stone", [[-3.5, 14, L - 0.3], [3.5, 14, L - 0.3], [0, 17.6, L - 0.3]], [0, 0, 1]);
       M.in(0, 0, L - 0.28, 0, () => {
         if (!open) { M.arch("stone", 0, 0, 4.6, 6.6, 0, { tint: DARK }); M.arch("wood", 0, 0, 3.2, 5.4, 0.05, { tint: DOOR }); }
-        M.box("stone", -3.5, 6.6, 0, 3.5, 6.85, 0.14, { tint: DARK, under: true });
-        for (let i = -3; i <= 3; i++) M.arch("stone", i * 0.92, 6.95, 0.6, 1.5, 0.02, { tint: DARK });
-        M.disc("stone", 0, 10.7, 2.3, 0.02, { tint: DARK }); M.disc("glass", 0, 10.7, 1.8, 0.05);
-        for (let i = 0; i < 8; i++) M.disc("cloth", Math.cos(i * PI / 4) * 1.15, 10.7 + Math.sin(i * PI / 4) * 1.15, 0.27, 0.07, { tint: i % 2 ? VINO : OCRA }, 8);
-        M.disc("stone", 0, 10.7, 0.4, 0.08, { tint: DARK }, 8); M.disc("glass", 0, 15.2, 0.5, 0.02, {}, 8);
+        if (open) {   // il portale strombato: tre ghiere una davanti all'altra, ognuna sulle sue colonnine
+          const e = entry("cattedrale", 0), sp = e.h - e.w * 0.75;
+          for (let i = 0; i < 3; i++) archRing(M, TRIM, e.x, 0, e.w + i * 0.6, e.h + i * 0.45, 0.3, 0, 0.13 * (i + 1), { tint: i % 2 ? GOLA : LISCIA });
+          for (const s of [-1, 1]) for (let i = 0; i < 3; i++) M.piece("colonnina", e.x + s * (e.w / 2 + 0.15 + i * 0.3), 0.45, 0.13 * (i + 1) + 0.1, { size: [1.5, sp - 0.45, 1.5], as: TRIM, tint: LISCIA });
+        }
+        // la galleria: sette nicchie fra otto colonnine, sulla sua cornice
+        M.box(TRIM, -3.5, 6.6, 0, 3.5, 6.85, 0.36, { tint: GOLA, under: true });
+        for (let i = -3; i <= 3; i++) { M.arch("dark", i * 0.92, 6.95, 0.6, 1.5, 0.015); archRing(M, TRIM, i * 0.92, 6.95, 0.6, 1.5, 0.14, 0, 0.2, { tint: LISCIA }); }
+        for (let i = -4; i <= 3; i++) M.piece("colonnina", i * 0.92 + 0.46, 6.85, 0.25, { size: [1, 1.15, 1], as: TRIM, tint: LISCIA });
+        // il rosone (kit, sul modello di quello ovest di Chartres): la vetrata dietro, il traforo di pietra davanti
+        M.disc("lume", 0, 10.95, 2.15, 0.02, {}, 32);
+        M.piece("rosone", 0, 10.95, 0.03, { size: [2.25, 2.25, 2.2], as: TRIM, tint: LISCIA });
+        M.disc("glass", 0, 15.2, 0.5, 0.02, {}, 12); M.piece("rosone", 0, 15.2, 0.03, { size: [0.62, 0.62, 1], as: TRIM, tint: LISCIA });
       });
-      for (let i = 0; i < 3; i++) M.box("stone", -3.4 - i * 0.3, 0, L - 0.3, 3.4 + i * 0.3, 0.45 - i * 0.15, L + 0.4 + i * 0.6, { tint: DARK });
+      for (let i = 0; i < 5; i++) M.box("stone", -3.4 - i * 0.18, 0, L - 0.3, 3.4 + i * 0.18, 0.45 - i * 0.09, L + 0.4 + i * 0.36, { tint: DARK });   // (cinque gradini bassi: ingranditi restano da salire; gli stessi in layouts.ts)
     }),
 
     // municipio: portico, balcone con lo stendardo, torre dell'orologio
@@ -630,27 +1085,41 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       if (open) {   // guscio: tre muri, la facciata col vano del portone nell'arco di mezzo, il marcapiano come cornice (dentro ci passano il solaio e la scala)
         for (const s of [-1, 1]) wallFace(M, "stone", s * 11, -5.5, s * 11, 5.5, 0, 4.4, [s, 0, 0]);
         wallFace(M, "stone", -11, -5.5, 11, -5.5, 0, 4.4, [0, 0, -1]);
-        M.in(0, 0, 5.5, 0, () => portal(M, -11, 11, 4.4, entry("municipio", 0), [0.7, 0.4, 0.02]));
+        // ai lati del portone c'erano quattro archi neri dipinti sul muro: ora sono le finestre della sala, in vani veri
+        const gx = [-8.9, -5.9, 5.9, 8.9], gm = gx.map((x) => [x - 0.9, 0.9, x + 0.9, 3.9, 1]);
+        M.in(0, 0, 5.5, 0, () => { portal(M, -11, 11, 4.4, entry("municipio", 0), [0.7, 0.4, 0.02], true, gm, 0.18); for (const x of gx) see(() => win(M, x, 0.9, 1.8, 3, "lume", true, 0.18)); });
         ring(M, 11.15, 5.65, 4.3, 4.6, 0.6);
       } else { M.box("stone", -11, 0, -5.5, 11, 4.4, 5.5); M.solid(-11, -5.5, 11, 5.5, 0.7); M.box("stone", -11.15, 4.3, -5.65, 11.15, 4.6, 5.65, { tint: DARK, under: true }); }
-      M.box("plaster", -10.9, 4.4, -5.4, 10.9, 9.2, 5.4);
+      M.box("plaster", -10.9, 4.4, -5.4, 10.9, 9.2, 5.4, { noFront: true });
+      M.in(0, 0, 5.4, 0, () => {   // la facciata del piano nobile coi vani veri delle cinque finestre
+        const ws = [-2, -1, 0, 1, 2].map((i) => (i ? [i * 4.2, 5.6, 1.3, 2.7] : [0, 5.1, 1.5, 3.3]));
+        M.wall("plaster", -10.9, 4.4, 10.9, 9.2, ws.map(([x, y, w, h]) => [x - w / 2, y, x + w / 2, y + h, 1]), DEEP);
+        for (const i of [0, 1, 3, 4, 2]) see(() => win(M, ws[i][0], ws[i][1], ws[i][2], ws[i][3], i === 2 ? "lume" : lit(), true, DEEP));   // (l'ordine di prima: `lit` estrae)
+      });
       M.box("timber", -11.25, 9.2, -5.75, 11.25, 9.5, 5.75, { under: true });
       M.in(0, 0, 0, 0, () => M.hip("tile", 11.6, 6.1, 9.5, 4.8));
       M.in(0, 0, 5.52, 0, () => {
-        for (let i = -2; i <= 2; i++) if (i || !open) { M.arch("stone", i * 4.2, 0, 3.5, 4.1, 0, { tint: DARK }); M.arch("dark", i * 4.2, 0, 2.8, 3.7, 0.04); }
-        for (const i of [-2, -1, 1, 2]) win(M, i * 4.2, 5.6, 1.3, 2.7, lit(), true);
-        win(M, 0, 5.1, 1.5, 3.3, "lume", true);
+        if (!open) for (let i = -2; i <= 2; i++) { M.arch("stone", i * 4.2, 0, 3.5, 4.1, 0, { tint: DARK }); M.arch("dark", i * 4.2, 0, 2.8, 3.7, 0.04); }
         M.box("stone", -2.4, 4.6, 0, 2.4, 4.85, 1.1, { tint: DARK, under: true });
-        M.box("stone", -2.4, 4.85, 0.96, 2.4, 5.75, 1.1); for (const s of [-1, 1]) M.box("stone", s * 2.33 - 0.07, 4.85, 0, s * 2.33 + 0.07, 5.75, 1.1);
-        M.box("cloth", -0.75, 1.9, 1.11, 0.75, 4.85, 1.15, { tint: VINO }); M.disc("cloth", 0, 3.6, 0.38, 1.17, { tint: ORO });
+        for (const s of [-1, 1]) { M.box("stone", s * 2.33 - 0.07, 4.85, 0, s * 2.33 + 0.07, 5.75, 1.1); M.box("stone", s * 1.2 - 0.12, 4.2, 0, s * 1.2 + 0.12, 4.6, 0.9, { tint: DARK, under: true }); }   // i fianchi, le mensole
+        M.box("stone", -2.4, 5.6, 0.93, 2.4, 5.75, 1.13, { tint: DARK, under: true });                                                                         // la balaustra: colonnini (kit) sotto la cimasa
+        for (let i = -7; i <= 7; i++) M.piece("colonnino", i * 0.3, 4.85, 1.03, { size: [2.4, 0.75 / 0.85, 2.4], as: TRIM, tint: LISCIA });
+        for (let i = -18; i <= 18; i++) M.box("timber", i * 0.6 - 0.07, 8.95, -0.12, i * 0.6 + 0.07, 9.2, 0.2, { under: true });                                // le mensole della gronda
+        drape(M, -0.75, 1.9, 0.75, 4.85, 1.13, VINO, 0.5); M.disc("cloth", 0, 3.6, 0.38, 1.17, { tint: ORO, wave: (p) => (4.85 - p[1]) / 3.45 });
+        for (const s of [-1, 1]) { drape(M, s * 6.3 - 0.55, 5.3, s * 6.3 + 0.55, 8.8, -0.06, s > 0 ? OCRA : VINO, 0.45); M.box("iron", s * 6.3 - 0.65, 8.8, -0.12, s * 6.3 + 0.65, 8.86, 0, { under: true }); }   // due drappi lunghi fra le finestre
       });
       M.box("stone", -2.3, 9.2, 0.6, 2.3, 20, 5.2);
       M.in(0, 0, 5.22, 0, () => {
-        M.disc("cloth", 0, 15, 1.15, 0, { tint: BIANCO }); M.box("iron", -0.035, 15, 0.02, 0.035, 15.95, 0.05, { rot: [0, 0, -0.7] });
-        for (const q of [-1, 1]) M.arch("dark", q * 0.9, 16.9, 0.9, 2.5, 0);
+        // l'orologio: la mostra di pietra, il quadrante, le dodici tacche, le due lancette che partono dal perno
+        M.disc(TRIM, 0, 15, 1.42, 0.005, { tint: GOLA }, 24); M.disc("cloth", 0, 15, 1.15, 0.03, { tint: BIANCO }, 24);
+        const hand = (a: number, r0: number, r1: number, hw: number, z: number): void => M.box("iron", Math.sin(a) * (r0 + r1) / 2 - hw, 15 + Math.cos(a) * (r0 + r1) / 2 - (r1 - r0) / 2, z, Math.sin(a) * (r0 + r1) / 2 + hw, 15 + Math.cos(a) * (r0 + r1) / 2 + (r1 - r0) / 2, z + 0.02, { rot: [0, 0, -a] });
+        for (let i = 0; i < 12; i++) hand(i * PI / 6, 0.88, 1.08, i % 3 ? 0.022 : 0.04, 0.035);
+        hand(0.7, -0.12, 0.92, 0.03, 0.06); hand(-1.9, -0.1, 0.6, 0.04, 0.045); M.disc("iron", 0, 15, 0.08, 0.085, {}, 8);
+        for (const q of [-1, 1]) { lancet(M, q * 0.9, 16.9, 0.9, 2.5, "dark", 0.2); quoins(M, q * 2.3, -0.02, q, 1, 20); }
       });
       M.box("stone", -2.55, 20, 0.35, 2.55, 20.5, 5.45, { tint: DARK, under: true });
       M.pyramid("slate", -2.6, 0.3, 2.6, 5.5, 20.5, 25.8);
+      for (const sx of [-1, 1]) for (const z of [0.55, 5.25]) M.piece("guglia", sx * 2.35, 20.5, z, { size: [1.5, 1.5, 1.5], as: TRIM, tint: LISCIA });
     }),
 
     // fucina: una tettoia aperta sulla via, con la forgia accesa e l'incudine
@@ -664,7 +1133,7 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       embers(M.world(-2.1, 1.5, -1.34), 0.56); fire(M.world(-2.1, 1.56, -1.36), 0.95, 0.8, 1);
       flames.push(M.world(-2.1, 2.2, 0.2));   // il riverbero della forgia sotto la tettoia (alla quota delle lanterne: la luce cotta ne ha una sola)
       M.solid(-2.9, -2.4, -1.3, -1, 0.35);
-      M.drum("wood", 0.2, 1.3, 0.26, 0, 0.5); M.box("iron", -0.22, 0.5, 1.16, 0.62, 0.72, 1.44); M.line(0.2, 1.3, 0.2, 1.3, 0.35);
+      M.drum("wood", 0.2, 1.3, 0.26, 0, 0.5); M.piece("incudine", 0.2, 0.5, 1.3, { size: [1.5, 1.5, 1.5] }); M.line(0.2, 1.3, 0.2, 1.3, 0.35);
       barrel(M, 2.5, -1.7);
       // "si entra" in una tettoia aperta: gli attrezzi del fabbro e i posti, all'aperto e nei materiali della città (il seme non è quello della città)
       if (c.interior) plans.push(furnish(scene, M, layout("fucina", 0, 0, mulberry32(seedOf(c))), c.id!));
@@ -673,8 +1142,8 @@ export function createTown(scene: Scene, def: LocationDef): Town {
     pozzo: (c) => place(c, () => {
       // vera di pietra a tre corsi con la cimasa che sporge, il buio dentro; due montanti con le saette, l'argano col suo
       // rullo e la manovella, la corda, il secchio di doghe
-      M.drum("stone", 0, 0, 1.0, 0, 0.3, { tint: DARK }, 0.97, 14); M.drum("stone", 0, 0, 0.93, 0.3, 0.78, {}, 0.91, 14); M.drum("stone", 0, 0, 0.99, 0.78, 0.9, { tint: DARK }, 0.99, 14);
-      M.drum("dark", 0, 0, 0.72, 0.9, 0.905, {}, 0.72, 14);
+      M.piece("vera", 0, 0, 0, { as: TRIM, tint: LISCIA });   // la vera tornita, cava (kit); in fondo il buio
+      M.drum("dark", 0, 0, 0.73, 0.3, 0.305, {}, 0.73, 14);
       for (const s of [-1, 1]) {
         M.box("timber", s * 0.86 - 0.075, 0.9, -0.075, s * 0.86 + 0.075, 2.4, 0.075);
         M.box("timber", s * 0.62 - 0.05, 1.85, -0.05, s * 0.62 + 0.05, 2.45, 0.05, { rot: [0, 0, s * 0.75] });
@@ -683,19 +1152,16 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       M.in(0, 1.78, 0, 0, () => { for (let i = 0; i < 8; i++) M.box("wood", -0.72, -0.05, -0.1, 0.72, 0.05, 0.1, { rot: [i * PI / 8, 0, 0] }); });
       M.box("iron", -0.98, 1.76, -0.02, 0.98, 1.8, 0.02); M.box("iron", 0.98, 1.5, -0.02, 1.02, 1.8, 0.02); M.box("iron", 0.98, 1.48, -0.02, 1.2, 1.52, 0.02);
       M.box("cloth", -0.015, 1.24, 0.09, 0.015, 1.72, 0.12, { tint: LINO });
-      M.drum("wood", 0, 0.105, 0.12, 0.98, 1.24, {}, 0.15, 10); M.drum("iron", 0, 0.105, 0.155, 1.19, 1.22, {}, 0.155, 10); M.drum("dark", 0, 0.105, 0.12, 1.24, 1.245, {}, 0.12, 10);
+      prop("wooden_bucket_01", M.world(0, 0.96, 0.105), 0.6, { h: 0.3 });   // il secchio appeso (modello)
+      { const q = M.world(1.25, 0, 0.5); prop("wooden_bucket_01", q, turn(q), { h: 0.34 }); }
       M.roof("slate", 1.2, -0.6, 0.6, 2.4, 0.75, 0.1);
       M.line(0, 0, 0, 0, 1.0);
     }),
     fontana: (c) => place(c, () => {
       // vasca a sedici lati su un gradino, con lo zoccolo e l'orlo che sporgono; dentro l'acqua; al centro il fusto a nodi,
       // il catino, la seconda colonna e la pigna
-      M.drum("stone", 0, 0, 2.62, 0, 0.16, { tint: DARK }, 2.62, 16);
-      M.drum("stone", 0, 0, 2.36, 0.16, 0.3, { tint: DARK }, 2.3, 16); M.drum("stone", 0, 0, 2.26, 0.3, 0.68, {}, 2.24, 16); M.drum("stone", 0, 0, 2.36, 0.68, 0.8, { tint: DARK }, 2.36, 16);
-      M.drum("glass", 0, 0, 2.0, 0.64, 0.66, {}, 2.0, 16);
-      M.drum("stone", 0, 0, 0.5, 0.6, 0.78, { tint: DARK }, 0.42, 10); M.drum("stone", 0, 0, 0.34, 0.78, 1.42, {}, 0.28, 10); M.drum("stone", 0, 0, 0.4, 1.42, 1.52, { tint: DARK }, 0.4, 10);
-      M.drum("stone", 0, 0, 0.42, 1.52, 1.72, {}, 1.02, 14); M.drum("stone", 0, 0, 1.06, 1.72, 1.82, { tint: DARK }, 1.06, 14); M.drum("glass", 0, 0, 0.9, 1.78, 1.79, {}, 0.9, 14);
-      M.drum("stone", 0, 0, 0.24, 1.72, 2.4, { tint: DARK }, 0.17, 10); M.drum("stone", 0, 0, 0.26, 2.4, 2.48, {}, 0.26, 10); M.drum("stone", 0, 0, 0.2, 2.48, 2.72, {}, 0.12, 8); M.drum("stone", 0, 0, 0.12, 2.72, 2.92, { tint: DARK }, 0.02, 8);
+      M.piece("fontana", 0, 0, 0, { as: TRIM, tint: LISCIA });   // tutta la pietra, tornita (kit); l'acqua nella vasca e nel catino
+      M.drum("glass", 0, 0, 2.06, 0.7, 0.72, {}, 2.06, 32); M.drum("glass", 0, 0, 0.97, 1.79, 1.8, {}, 0.97, 32);
       M.line(0, 0, 0, 0, 2.3);
     }),
     // banco del mercato: il telo a strisce (`tint` e lino), la merce a mucchietti
@@ -703,42 +1169,37 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       const a = TELI[c.tint ?? "vino"], b = LINO, sx = Math.round(c.at[0]);
       // il piano di tre tavole su due cavalletti, la fascia davanti; quattro pali con le traverse che reggono il telo; il telo
       // a strisce fa una pancia nel mezzo e scende davanti in una balza a punte
-      for (let i = 0; i < 3; i++) M.box("wood", -1.5, 0.8, -0.5 + i * 0.35, 1.5, 0.86, -0.17 + i * 0.35, { under: true, tint: i % 2 ? [0.8, 0.76, 0.7] : undefined });
-      M.box("timber", -1.5, 0.66, 0.5, 1.5, 0.8, 0.55);
-      for (const px of [-1.1, 1.1]) for (const s of [-1, 1]) M.box("timber", px - 0.04, 0, s * 0.3 - 0.04, px + 0.04, 0.8, s * 0.3 + 0.04, { rot: [s * 0.22, 0, 0] });
-      for (const px of [-1.4, 1.4]) { M.box("timber", px - 0.05, 0, -0.5, px + 0.05, 2.4, -0.4); M.box("timber", px - 0.05, 0, 0.45, px + 0.05, 2.05, 0.55); M.box("timber", px - 0.035, 2.16, -0.62, px + 0.035, 2.23, 0.9, { rot: [0.26, 0, 0] }); }
-      M.box("timber", -1.6, 2.36, -0.49, 1.6, 2.42, -0.41); M.box("timber", -1.6, 2.01, 0.46, 1.6, 2.07, 0.54);
+      M.piece("bancarella", 0, 0, 0);   // tutto il legno (kit)
       for (let i = 0; i < 6; i++) {
         const x0 = -1.65 + i * 0.55, x1 = x0 + 0.55, tint = i % 2 ? a : b;
         for (let j = 0; j < 4; j++) {
           const u0 = j / 4, u1 = (j + 1) / 4, sag = (u: number): number => 2.42 - 0.44 * u - 0.09 * Math.sin(u * PI);
-          M.face("cloth", [[x0, sag(u0), -0.7 + 1.65 * u0], [x1, sag(u0), -0.7 + 1.65 * u0], [x1, sag(u1), -0.7 + 1.65 * u1], [x0, sag(u1), -0.7 + 1.65 * u1]], [0, 1, 0], { tint });
+          M.face("cloth", [[x0, sag(u0), -0.7 + 1.65 * u0], [x1, sag(u0), -0.7 + 1.65 * u0], [x1, sag(u1), -0.7 + 1.65 * u1], [x0, sag(u1), -0.7 + 1.65 * u1]], [0, 1, 0], { tint, wave: () => 0.3 });
         }
-        M.face("cloth", [[x0, 1.98, 0.95], [x1, 1.98, 0.95], [(x0 + x1) / 2, 1.74, 0.97]], [0, 0, 1], { tint });
+        M.face("cloth", [[x0, 1.98, 0.95], [x1, 1.98, 0.95], [(x0 + x1) / 2, 1.74, 0.97]], [0, 0, 1], { tint, wave: (p) => (p[1] < 1.9 ? 1 : 0.3) });
       }
-      for (let i = 0; i < 5; i++) M.box("cloth", -1.3 + i * 0.56, 0.86, -0.3, -0.9 + i * 0.56, 0.98 + rnd() * 0.12, 0.3, { tint: [RUGGINE, MUSCHIO, OCRA, LINO, VINO][((i + sx + 16) % 5 + 5) % 5] });
+      // la merce: ceste, brocche, ciotole e paioli veri sul piano (modelli); ⚠️ `rnd` si estrae lo stesso, cinque volte: il resto della città ne dipende
+      const WARES = ["wicker_basket_01", "jug_01", "wooden_bowl_01", "brass_pot_01", "wicker_basket_01"] as const, WIDE = [0.42, 0.26, 0.3, 0.3, 0.36];
+      for (let i = 0; i < 5; i++) {
+        rnd();
+        const k = ((i + sx + 16) % 5 + 5) % 5, p = M.world(-1.1 + i * 0.55, 0.86, (k % 2 ? 0.12 : -0.1));
+        prop(WARES[k], p, turn(p), { w: WIDE[k] });
+        if (k % 2 === 0) { const q = M.world(-1.1 + i * 0.55 + 0.05, 0.86, 0.3); prop(WARES[(k + 2) % 5], q, turn(q), { w: WIDE[(k + 2) % 5] * 0.8 }); }
+      }
       M.solid(-1.5, -0.5, 1.5, 0.55, 0.4);
     }),
     panchina: (c) => place(c, () => {
       // sedile di tre assi, fianchi sagomati con i piedi e il bracciolo, schienale di due assi inclinato
-      for (let i = 0; i < 3; i++) M.box("wood", -0.9, 0.38, -0.22 + i * 0.15, 0.9, 0.43, -0.085 + i * 0.15, { under: true, tint: i % 2 ? [0.8, 0.76, 0.7] : undefined });
-      for (const s of [-1, 1]) {
-        for (const pz of [-0.2, 0.17]) M.box("timber", s * 0.76 - 0.045, 0, pz - 0.045, s * 0.76 + 0.045, 0.38, pz + 0.045);
-        M.box("timber", s * 0.76 - 0.04, 0.3, -0.22, s * 0.76 + 0.04, 0.38, 0.22); M.box("timber", s * 0.76 - 0.04, 0.6, -0.26, s * 0.76 + 0.04, 0.66, 0.2);
-        M.box("timber", s * 0.76 - 0.04, 0.38, -0.29, s * 0.76 + 0.04, 0.95, -0.21, { rot: [-0.1, 0, 0] }); M.box("timber", s * 0.76 - 0.035, 0.43, 0.13, s * 0.76 + 0.035, 0.6, 0.2);
-      }
-      for (const yy of [0.56, 0.78]) M.box("wood", -0.9, yy, -0.33, 0.9, yy + 0.16, -0.29, { rot: [-0.1, 0, 0] });
+      M.piece("panchina", 0, 0, 0);   // (kit)
     }),
     "panca.pietra": (c) => place(c, () => { M.box("stone", -0.7, 0.34, -0.22, 0.7, 0.46, 0.22, { under: true }); for (const s of [-1, 1]) M.box("stone", s * 0.5 - 0.12, 0, -0.2, s * 0.5 + 0.12, 0.34, 0.2, { tint: DARK }); }),
 
-    lampione: (c) => lamppost(M, c.at[0], c.at[1]),
+    lampione: (c) => lamppost(M, c.at[0], c.at[1], `lampione.${posts++}`),
     botte: (c) => place(c, () => barrel(M, 0, 0)),
     cassa: (c) => place(c, () => {   // cassa di tavole: i listelli agli spigoli e in croce sui fianchi, il coperchio che sporge
-      const s = c.size![0] / 2, h = s * 1.6, b = Math.min(0.07, s * 0.16);
-      M.box("wood", -s, 0, -s, s, h, s);
-      for (const sx of [-1, 1]) for (const sz of [-1, 1]) M.box("timber", sx * s - (sx > 0 ? b : -0) - (sx < 0 ? 0.012 : 0), 0, sz * s - (sz > 0 ? b : 0) - (sz < 0 ? 0.012 : 0), sx * s + (sx > 0 ? 0.012 : b), h, sz * s + (sz > 0 ? 0.012 : b));
-      for (const yy of [0, h - b]) for (const g of [-1, 1]) { M.box("timber", -s, yy, g * s - (g > 0 ? 0 : 0.014), s, yy + b, g * s + (g > 0 ? 0.014 : 0)); M.box("timber", g * s - (g > 0 ? 0 : 0.014), yy, -s, g * s + (g > 0 ? 0.014 : 0), yy + b, s); }
-      M.box("wood", -s - 0.02, h, -s - 0.02, s + 0.02, h + 0.035, s + 0.02, { under: true, tint: [0.8, 0.76, 0.7] });
+      // una cassa vera (modello): le grandi sono casse lunghe, le piccole cassette basse
+      const s = c.size![0] / 2, p = M.world(0, 0, 0);
+      prop(s > 0.29 ? "wooden_crate_02" : "wooden_crate_01", p, turn(p), { w: s * 2.6 });
       M.line(0, 0, 0, 0, s * 1.2);
     }),
     carretto: (c) => place(c, () => {   // carretto a mano
@@ -747,9 +1208,7 @@ export function createTown(scene: Scene, def: LocationDef): Town {
         M.box("wood", -0.75, 0.63, s * 0.5 - 0.03, 0.75, 0.98, s * 0.5 + 0.03); M.box("timber", -1.75, 0.6, s * 0.44 - 0.03, -0.75, 0.66, s * 0.44 + 0.03, { rot: [0, 0, 0.12] });
         // la ruota: il cerchione a dodici pezzi col ferro attorno, otto raggi, il mozzo
         M.in(0.15, 0.42, s * 0.57, 0, () => {
-          for (let i = 0; i < 12; i++) { const a = i / 12 * 2 * PI; M.box("timber", Math.cos(a) * 0.38 - 0.11, Math.sin(a) * 0.38 - 0.035, -0.03, Math.cos(a) * 0.38 + 0.11, Math.sin(a) * 0.38 + 0.035, 0.03, { rot: [0, 0, a + PI / 2], under: true }); }
-          for (let i = 0; i < 4; i++) M.box("timber", -0.37, -0.022, -0.018, 0.37, 0.022, 0.018, { rot: [0, 0, i * PI / 4], under: true });
-          M.box("iron", -0.07, -0.07, -0.05, 0.07, 0.07, 0.05, { under: true });
+          M.piece("ruota", 0, 0, 0);   // (kit)
         });
       }
       M.box("timber", 0.12, 0.39, -0.6, 0.18, 0.45, 0.6);
@@ -758,11 +1217,28 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       M.solid(-0.75, -0.5, 0.75, 0.5, 0.4);
     }),
     bacheca: (c) => place(c, () => {   // bacheca degli avvisi
-      for (const s of [-1, 1]) M.box("timber", s * 0.6 - 0.05, 0, -0.05, s * 0.6 + 0.05, 1.95, 0.05);
-      M.box("wood", -0.62, 0.85, -0.03, 0.62, 1.75, 0.03); M.roof("slate", 0.78, -0.12, 0.12, 1.95, 0.3, 0.02);
+      M.piece("bacheca", 0, 0, 0); M.roof("slate", 0.78, -0.12, 0.12, 1.95, 0.3, 0.02);   // pali e tavolato (kit)
       M.box("cloth", -0.5, 1.15, 0.03, -0.14, 1.62, 0.04, { tint: LINO }); M.box("cloth", -0.06, 1.25, 0.03, 0.26, 1.6, 0.04, { tint: BIANCO }); M.box("cloth", 0.3, 0.98, 0.03, 0.56, 1.45, 0.04, { tint: LINO, rot: [0, 0, 0.1] });
       M.line(-0.6, 0, 0.6, 0, 0.2);
     }),
+    // festone e panni: tesi fra due capi (`span`)
+    festone: (c) => span(M, c),
+    // stendardo: un'asta su uno zoccolo di pietra, la traversa, il drappo con lo stemma
+    stendardo: (c) => place(c, () => {
+      M.box("stone", -0.22, 0, -0.22, 0.22, 0.2, 0.22, { tint: DARK }); M.box("timber", -0.045, 0.2, -0.045, 0.045, 4.4, 0.045); M.box("timber", -0.6, 4.1, -0.03, 0.6, 4.16, 0.03, { under: true });
+      M.pyramid("iron", -0.07, -0.07, 0.07, 0.07, 4.4, 4.62);
+      drape(M, -0.5, 1.9, 0.5, 4.1, 0.035, TELI[c.tint ?? "vino"], 0.4); M.disc("cloth", 0, 3.3, 0.24, 0.045, { tint: ORO, wave: (p) => (4.1 - p[1]) / 2.6 }, 12);
+      M.line(0, 0, 0, 0, 0.25);
+    }),
+    // insegna di bottega: l'origine è sul muro, +Z in fuori; un braccio di ferro con la saetta, la tavola appesa a due anelli, lo stemma sulle due facce
+    insegna: (c) => place(c, () => {
+      M.box("iron", -0.025, 3.42, 0, 0.025, 3.47, 1.15, { under: true }); M.box("iron", -0.02, 2.95, 0, 0.02, 3.42, 0.04);
+      M.box("iron", -0.012, 3.17, 0.02, 0.012, 3.2, 0.62, { rot: [-0.62, 0, 0], under: true });
+      for (const z of [0.5, 1]) M.box("iron", -0.008, 3.2, z - 0.008, 0.008, 3.42, z + 0.008);
+      M.box("wood", -0.035, 2.66, 0.36, 0.035, 3.2, 1.14, { tint: DOOR, under: true });
+      for (const s of [-1, 1]) M.in(s * 0.04, 0, 0.75, s * PI / 2, () => M.disc("cloth", 0, 2.93, 0.19, 0, { tint: TELI[c.tint ?? "ocra"] }, 10));
+    }),
+    panni: (c) => span(M, c),
     // orto: quattro file di cavoli, dall'angolo in poi verso est e nord
     orto: (c) => place(c, () => { for (let i = 0; i < 4; i++) for (let j = 0; j < 9; j++) M.box("cloth", j * 0.8, 0, i * 0.85, 0.3 + j * 0.8, 0.14 + rnd() * 0.16, 0.3 + i * 0.85, { tint: MUSCHIO }); }),
     // lapidi: due file da cinque, un po' storte
@@ -773,12 +1249,37 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       }
     }),
     };
-    for (const c of def.children) PREFABS[c.prefab](c);
+    // ogni cosa con un nome è un gruppo: le sue fiamme e il suo fumo si accendono e si spengono insieme (flames.ts), le sue finestre pure
+    const shared = rnd;
+    def.children.forEach((c, i) => {
+      const from = lumes();
+      THRU = c.id && c.interior ? [] : null; GLOW = [];
+      // (in modalità editor ogni elemento nelle SUE mesh, `#i`, così si sposta da solo; altrimenti l'arredo di strada a parte, `+`)
+      M.tag = opts.editor ? `#${i}` : FURNITURE.has(c.prefab) ? "+" : "";
+      rnd = mulberry32(variantOf(c)); propOwner(i);
+      group(c.id ?? "", () => PREFABS[c.prefab](c));
+      M.tag = "";
+      if (c.id && lumes() > from) homes.set(c.id, [from, lumes()]);
+      if (THRU?.length) { thru.set(c.id!, THRU); glow.set(c.id!, GLOW); }
+      THRU = null;
+    });
+    rnd = shared; propOwner(-1);
   });
 
   // ── materiali e mesh ──
-  const surf = (name: string, tex: ReturnType<typeof masonryTex>, tint?: Color3, rough?: number, relief?: number): Material => {
-    const m = surfaceMaterial(scene, `town_${name}`, tex, { tint, rough, relief });
+  const surf = (name: string, tex: ReturnType<typeof masonryTex>, tint?: Color3, rough?: number, relief?: number, moss?: number): Material => {
+    const m = surfaceMaterial(scene, `town_${name}`, tex, { tint, rough, relief, moss: moss ? { y: TOWN.y, k: moss } : undefined });
+    // col cel shading: la texture dipinta al posto della foto (colore e normali; la mappa di occlusione e ruvidezza della foto non c'entra più)
+    const kind = ({ stone: "stone", plaster: "plaster", timber: "wood", wood: "wood", slate: "slate", tile: "tile", flag: "flag", sett: "sett", cobble: "cobble" } as Record<string, Painted>)[name];
+    if (kind) {
+      const photo = { a: m.albedoTexture, n: m.bumpTexture, arm: m.metallicTexture, met: m.metallic, r: m.roughness };
+      onPainted((on) => {
+        const t = on ? paintedTex(scene, kind) : null;
+        m.albedoTexture = t ? t.albedo : photo.a; m.bumpTexture = t ? t.normal : photo.n;
+        m.metallicTexture = t ? null : photo.arm; m.metallic = t ? 0 : photo.met; m.roughness = t ? 0.9 : photo.r;
+      });
+    }
+    if (name === "cloth") addFlutter(m);   // drappi, bandierine e teli si muovono al vento
     m.backFaceCulling = false;   // le normali guardano fuori: falde e teloni si vedono anche da sotto
     return m;
   };
@@ -789,23 +1290,27 @@ export function createTown(scene: Scene, def: LocationDef): Town {
   };
   const mats: Record<string, Material> = {
     // texture fotografiche (CC0, Poly Haven: `photoTex`); le tinte le riportano al tono cupo della città
-    stone: surf("stone", photoTex(scene, "medieval_blocks_05"), new Color3(0.8, 0.78, 0.76), undefined, 0.022), plaster: surf("plaster", photoTex(scene, "plastered_wall_04"), new Color3(0.82, 0.74, 0.6), undefined, 0.004),
-    timber: surf("timber", photoTex(scene, "medieval_wood"), new Color3(0.5, 0.42, 0.36), undefined, 0.012), wood: surf("wood", photoTex(scene, "weathered_planks"), new Color3(0.8, 0.72, 0.62), undefined, 0.012),
-    slate: surf("slate", photoTex(scene, "roof_slates_02"), new Color3(0.8, 0.82, 0.86), undefined, 0.016), tile: surf("tile", photoTex(scene, "clay_roof_tiles_02"), new Color3(0.85, 0.75, 0.7), undefined, 0.03),
-    thatch: surf("thatch", photoTex(scene, "thatch_roof_angled"), new Color3(0.8, 0.74, 0.6), undefined, 0.02), iron: surf("iron", photoTex(scene, "rusty_metal_02"), new Color3(0.5, 0.5, 0.52)),
+    stone: surf("stone", photoTex(scene, "medieval_blocks_05"), new Color3(0.8, 0.78, 0.76), undefined, 0.022, 0.9), plaster: surf("plaster", photoTex(scene, "plastered_wall_04"), new Color3(0.82, 0.74, 0.6), undefined, 0.004, 0.5),
+    timber: surf("timber", photoTex(scene, "medieval_wood"), new Color3(0.5, 0.42, 0.36), undefined, 0.012, 0.3), wood: surf("wood", photoTex(scene, "weathered_planks"), new Color3(0.8, 0.72, 0.62), undefined, 0.012),
+    slate: surf("slate", photoTex(scene, "roof_slates_02"), new Color3(0.8, 0.82, 0.86), undefined, 0.016, 0.8), tile: surf("tile", photoTex(scene, "clay_roof_tiles_02"), new Color3(0.85, 0.75, 0.7), undefined, 0.03, 0.6),
+    thatch: surf("thatch", photoTex(scene, "thatch_roof_angled"), new Color3(0.8, 0.74, 0.6), undefined, 0.02, 0.85), iron: surf("iron", photoTex(scene, "rusty_metal_02"), new Color3(0.5, 0.5, 0.52)),
     cloth: surf("cloth", clothTex(scene), undefined, 0.95),
     flag: surf("flag", photoTex(scene, "monastery_stone_floor"), new Color3(0.8, 0.78, 0.76), undefined, 0.012), sett: surf("sett", photoTex(scene, "cobblestone_floor_08"), new Color3(0.8, 0.78, 0.76), undefined, 0.03),
     cobble: surf("cobble", photoTex(scene, "cobblestone_05"), new Color3(0.8, 0.78, 0.76), undefined, 0.03),
     glass: flat("glass", new Color3(0.03, 0.05, 0.06), Color3.Black()), dark: flat("dark", Color3.Black(), new Color3(0.004, 0.004, 0.004)),
     // ⚠️ HDR: il lume passa appena la soglia del bloom; più acceso diventa una lampadina bianca.
     // Tre materiali con lo stesso colore di partenza: finestre e lanterne seguono l'ora (main.ts), le fiamme no.
-    lume: flat("lume", Color3.Black(), new Color3(1.2, 0.5, 0.12)), lamp: flat("lamp", Color3.Black(), new Color3(1.2, 0.5, 0.12)),
+    lume: lumeMat(scene), lamp: flat("lamp", Color3.Black(), new Color3(1.2, 0.5, 0.12)),
     fire: flat("fire", Color3.Black(), new Color3(1.2, 0.5, 0.12)),
+    // il vetro vero delle finestre aperte: una lastra scura quasi trasparente (da tutte e due le parti)
+    vetro: glassMat(scene),
   };
-  const meshes: Mesh[] = [];
+  const meshes: Mesh[] = [], byChild: Mesh[][] = [];
   for (const [k, g] of M.geos) {
     const mesh = g.mesh(`town_${k}`, scene);
-    mesh.material = mats[k]; mesh.isPickable = false; mesh.receiveShadows = true; mesh.freezeWorldMatrix();
+    mesh.material = mats[Mason.material(k)]; mesh.isPickable = false; mesh.receiveShadows = true; mesh.freezeWorldMatrix();
+    const el = /#(\d+)$/.exec(k);
+    if (el) { const i = Number(el[1]); mesh.metadata = { child: i }; (byChild[i] ??= []).push(mesh); }
     meshes.push(mesh);
   }
   // gli interni (interiors.ts): le loro mesh stanno a parte e si accendono da vicino; i battenti degli usci, visti da fuori, stanno con la città
@@ -815,17 +1320,28 @@ export function createTown(scene: Scene, def: LocationDef): Town {
   if (fronts) meshes.push(fronts);
   const colliders = [...M.colliders, ...built.flatMap((b) => b.colliders)];
   // la luce dei lampioni, cotta sul rettangolo della città (la porta e il suo lampione stanno fuori dalle mura, a ovest)
-  bakeLamps(scene, flames, [TOWN.x - hx - 20, TOWN.z - hz - 10, 2 * hx + 30, 2 * hz + 20]);
+  // la pozza di luce dei lampioni si ricuoce ogni volta che uno si accende o si spegne (pochi millisecondi)
+  // (e ciò che esce dalle case: `spill`, le finestre accese e gli usci aperti, più deboli e più corti di una lanterna)
+  let spill: { x: number; y: number; z: number; k: number; r: number }[] = [];
+  const lampOn = new Map<string, boolean>(), bake = (): void => bakeLamps(scene, [...flames, ...LAMPS.filter((l) => lampOn.get(l.id) ?? true).map((l) => l.p), ...spill], [TOWN.x - hx - 20, TOWN.z - hz - 10, 2 * hx + 30, 2 * hz + 20]);
+  bake();
 
   // ── il piano degli abitanti: nodi delle strade, collegamenti, posti ──
+  // (una funzione: l'editor la rifà coi tracciati e i posti che sta modificando, per controllare la rete mentre si disegna)
+  const replan = (walks: [number, number][][], spotDefs: Record<string, SpotDef>): TownPlan => {
   const w = (x: number, z: number): [number, number] => [TOWN.x + x, TOWN.z + z];
   // i tracciati del file: ogni punto è un nodo, i punti in fila sono collegati, un punto ripetuto è un incrocio
   const nodes: [number, number, number?][] = [], links: [number, number][] = [], seen = new Map<string, number>();
-  for (const line of def.walks) {
+  for (const line of walks) {
     const ids = line.map(([x, z]) => seen.get(`${x},${z}`) ?? (seen.set(`${x},${z}`, nodes.push(w(x, z)) - 1), nodes.length - 1));
     for (let i = 1; i < ids.length; i++) links.push([ids[i - 1], ids[i]]);
   }
-  const spots: TownPlan["spots"] = Object.fromEntries(Object.entries(def.spots).map(([k, s]) => [k, { x: TOWN.x + s.at[0], z: TOWN.z + s.at[1], yaw: rad(s.yaw) }]));
+  const spots: TownPlan["spots"] = Object.fromEntries(Object.entries(spotDefs).map(([k, s]) => [k, { x: TOWN.x + s.at[0], z: TOWN.z + s.at[1], yaw: rad(s.yaw) }]));
+  // un posto accanto a ogni lampione, dalla parte della strada: da lì il lampionaio lo accende
+  for (const l of LAMPS) if (l.id.startsWith("lampione.")) {
+    const n = nodes.reduce((b, q) => (Math.hypot(q[0] - l.p.x, q[1] - l.p.z) < Math.hypot(b[0] - l.p.x, b[1] - l.p.z) ? q : b)), d = Math.hypot(n[0] - l.p.x, n[1] - l.p.z) || 1, ux = (n[0] - l.p.x) / d, uz = (n[1] - l.p.z) / d;
+    spots[l.id] = { x: l.p.x + ux * 0.95, z: l.p.z + uz * 0.95, yaw: Math.atan2(-ux, -uz) };
+  }
   // i nodi di ogni interno in coda a quelli delle strade. Quello davanti all'uscio (il primo) si lega al nodo di strada più
   // vicino fra quelli che si raggiungono dritti, senza attraversare un muro (se non ce n'è, al più vicino: lo segnala `checkPlan`),
   // e a un secondo solo se è un suo vicino lungo la strada: così l'uscio sta "lungo" quel tratto e non diventa una scorciatoia
@@ -842,6 +1358,9 @@ export function createTown(scene: Scene, def: LocationDef): Town {
     links.push(...b.links.map(([p, q]): [number, number] => [p + base, q + base]), ...(first ? (next ? [first, next] : [first]) : near.slice(0, 1)).map(([, i]): [number, number] => [i, base]));
     Object.assign(spots, b.spots);
   }
+  return { nodes, links, spots };
+  };
+  const plan = replan(def.walks, def.spots);
   // i lumi delle case: il colore dei vertici moltiplica l'emissivo del materiale (che segue l'ora), e si riscrive solo quando una casa cambia
   const panes = meshes.find((m) => m.name === "town_lume"), tint = panes?.getVerticesData(VertexBuffer.ColorKind), was = new Map<string, number>();
   if (panes && tint) panes.setVerticesData(VertexBuffer.ColorKind, tint, true);
@@ -854,10 +1373,74 @@ export function createTown(scene: Scene, def: LocationDef): Town {
       for (let i = a * 4; i < b * 4; i++) if (i % 4 !== 3) tint![i] = v;
     }
     if (dirty) panes!.updateVerticesData(VertexBuffer.ColorKind, tint!);
+    // la luce che esce sulla strada: da ogni finestra aperta di una casa accesa, e dal suo uscio quando è aperto
+    const lit = [...glow.keys()].filter((id) => level(id) > 0.25), doors = openDoors().filter((d) => level(d.id) > 0.25);
+    const sig = lit.join() + "|" + doors.map((d) => d.id + d.x.toFixed(1)).join();
+    if (sig === spilt) return;
+    spilt = sig;
+    spill = lit.flatMap((id) => glow.get(id)!.map((g) => ({ ...g, k: 0.75, r: 5.5 })));
+    for (const d of doors) {
+      const c = built.find((b) => b.interior.id === d.id)!.interior, ux = d.x - c.x, uz = d.z - c.z, n = Math.hypot(ux, uz) || 1;
+      spill.push({ x: d.x + ux / n * 1.8, y: d.y + 1.2, z: d.z + uz / n * 1.8, k: 1, r: 6 });
+    }
+    bake();
+  };
+  let spilt = "";
+  // le finestre aperte: avvicinandosi (interiors.ts dice quanto) i loro lumi opachi sfumano fino a un velo, e si vede dentro.
+  // Per questo la mesh dei lumi si mescola (alfa dei vertici) e si disegna per prima fra le trasparenti, il vetro subito dopo.
+  if (panes) { panes.hasVertexAlpha = true; panes.alphaIndex = 0; }
+  const glassMesh = meshes.find((m) => m.name === "town_vetro");
+  if (glassMesh) { glassMesh.alphaIndex = 1; glassMesh.onBeforeRenderObservable.add(() => GRAB()); }
+  onInteriorShown((id, k) => {
+    const t = thru.get(id);
+    if (!t || !tint) return;
+    for (let i = 0; i < t.length; i += 2) for (let v = t[i]; v < t[i + 1]; v++) tint[v * 4 + 3] = 1 - 0.9 * k;
+    panes!.updateVerticesData(VertexBuffer.ColorKind, tint);
+  });
+  // i vetri delle lanterne: come le finestre, il colore dei vertici spegne l'emissivo
+  const glass = meshes.find((m) => m.name === "town_lamp"), gt = glass?.getVerticesData(VertexBuffer.ColorKind);
+  if (glass && gt) glass.setVerticesData(VertexBuffer.ColorKind, gt, true);
+  const light = (id: string, on: boolean): void => {
+    if ((lampOn.get(id) ?? true) === on) return;
+    lampOn.set(id, on);
+    let hit = false;
+    for (const l of LAMPS) if (l.id === id) { hit = true; for (let i = l.a * 4; i < l.b * 4; i++) if (i % 4 !== 3) gt![i] = on ? 1 : 0.05; }
+    if (hit) { glass!.updateVerticesData(VertexBuffer.ColorKind, gt!); bake(); }
+  };
+  /** Le mesh di ciò che un muratore ha costruito, coi materiali della città. */
+  const meshesOf = (m: Mason, name: string): Mesh[] => [...m.geos].map(([k, g]) => {
+    const mesh = g.mesh(`${name}_${k}`, scene); mesh.material = mats[Mason.material(k)]; mesh.receiveShadows = true; return mesh;
+  });
+  /**
+   * Un elemento costruito da solo, nelle sue mesh, come lo costruirebbe la città (stesso generatore, stesso seme): l'editor lo
+   * usa per mostrare subito un elemento nuovo o cambiato. Ciò che il generatore dichiara altrove (fiamme, lanterne, interni,
+   * posti dei lampioni) si butta: arriva salvando. Le copie da modello che dichiara le restituisce, per chi le vuole posare.
+   */
+  const build = (c: ChildDef, i: number): { meshes: Mesh[]; props: Want[] } => {
+    const keep = { M, rnd, posts, lamps: LAMPS.length, flames: flames.length, sites: sites.length, plans: plans.length }, fl = markFlames(), pm = markProps();
+    M = new Mason(); rnd = mulberry32(variantOf(c)); propOwner(i);
+    const m = M;
+    try { M.in(TOWN.x, TOWN.y, TOWN.z, 0, () => PREFABS[c.prefab](c)); }
+    finally { M = keep.M; rnd = keep.rnd; posts = keep.posts; LAMPS.length = keep.lamps; flames.length = keep.flames; sites.length = keep.sites; plans.length = keep.plans; fl(); propOwner(-1); }
+    return { meshes: meshesOf(m, `elemento${i}`), props: takeProps(pm) };
+  };
+  /** I selciati rifatti da soli (l'editor li ridisegna mentre se ne trascina un capo). */
+  const pavingAlone = (list: LocationDef["paving"]): Mesh[] => {
+    const keep = M, m = new Mason();
+    M = m;
+    try { M.in(TOWN.x, TOWN.y, TOWN.z, 0, () => layPaving(list)); } finally { M = keep; }
+    return meshesOf(m, "selciati");
+  };
+  /** Un oggetto teso costruito da solo, nelle sue mesh (l'editor lo ricostruisce mentre se ne trascina un capo). */
+  const spanAlone = (c: ChildDef): Mesh[] => {
+    const m = new Mason();
+    m.in(TOWN.x, TOWN.y, TOWN.z, 0, () => span(m, c));
+    return [...m.geos].map(([k, g]) => { const mesh = g.mesh(`span_${k}`, scene); mesh.material = mats[Mason.material(k)]; mesh.receiveShadows = true; return mesh; });
   };
   return {
-    windows,
-    meshes, colliders, plan: { nodes, links, spots },
+    editor: opts.editor ? { parts: def.children.map((_, i) => byChild[i] ?? []), span: spanAlone, replan, build, paving: pavingAlone, pavingMeshes: meshes.filter((m) => m.name.endsWith("#selciati")) } : undefined,
+    windows, light, lamps: LAMPS.map((l) => ({ id: l.id, x: l.p.x, z: l.p.z })),
+    meshes, colliders, plan,
     floors: built.flatMap((b) => b.floors), doors: built.flatMap((b) => b.doors), interiors: built.map((b) => b.interior), lumi: { finestre: mats.lume as StandardMaterial, lanterne: mats.lamp as StandardMaterial },
   };
 }

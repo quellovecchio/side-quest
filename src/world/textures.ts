@@ -673,6 +673,81 @@ export const slateTex = (scene: Scene): TexPair => coursed(scene, "slate", { row
 /** Coppi spenti del municipio. */
 export const roofTileTex = (scene: Scene): TexPair => coursed(scene, "roofTile", { rows: 9, cols: 12, gap: 0.08, sq: 5, dk: hex("#4f2a1e"), md: hex("#74402c"), lt: hex("#93573b"), joint: hex("#24130d"), lap: 0.6, stain: hex("#4a4630"), seed: 2601, normal: 6 });
 
+// ── Texture DIPINTE (per il cel shading) ─────────────────────────────────────
+// Una foto, anche ammorbidita, resta una foto: migliaia di sfumature che la luce a gradini non sa leggere. Queste sono
+// disegnate come le dipingerebbe una mano: ogni pietra (o asse, o lastra) è una campitura PIATTA in uno di tre toni, col
+// bordo chiaro dalla parte della luce e scuro dall'altra (la pennellata che dà il volume), e fughe scure nette. Niente
+// grana. Si usano solo a cel shading acceso (`setPainted` in materials.ts); hanno gli stessi metri per ripetizione delle
+// foto che sostituiscono, quindi le uv della geometria non cambiano. Non passano da `grade()`: sono già al tono giusto.
+
+/** Pietre, lastre, ciottoli, tegole dipinte: gli stessi filari sfalsati di `coursed`, ma a campiture. */
+function paintedCoursed(scene: Scene, name: string, o: Coursed): TexPair {
+  const wrap = (b: number): number => ((b % o.cols) + o.cols) % o.cols;
+  const jit = (row: number, b: number): number => (hash2(row, wrap(b), o.seed) - 0.5) * 0.36;
+  return tileable(scene, name, 512, (u, v) => {
+    const row = Math.floor(v * o.rows), fv = v * o.rows - row;
+    const cu = u * o.cols + (row % 2) * 0.5 + hash2(row, 99, o.seed) * 0.25;
+    let b = Math.floor(cu);
+    if (cu < b + jit(row, b)) b--; else if (cu >= b + 1 + jit(row, b + 1)) b++;
+    const left = b + jit(row, b), fu = (cu - left) / (b + 1 + jit(row, b + 1) - left);
+    const r = Math.pow(Math.abs(2 * fu - 1), o.sq) + Math.pow(Math.abs(2 * fv - 1), o.sq), d = 1 - o.gap - r;   // > 0 dentro la pietra
+    const tone = hash2(row, wrap(b), o.seed + 7), lap = (o.lap ?? 0) * (0.5 - fv);
+    let c = tone < 0.34 ? o.dk : tone < 0.72 ? o.md : o.lt;                       // tre toni, uno per pietra
+    if (d < 0.2) c = mixc(c, fu + fv < 1 ? o.lt : o.dk, 0.5);                      // la pennellata sul bordo: chiaro di qua, scuro di là
+    if (lap > 0.12) c = mixc(c, o.lt, 0.35);                                       // (tegole e ardesie: la fascia in luce di ogni filare)
+    const inside = sat(d * 30);
+    return [mixc(o.joint, c, inside), inside * (0.6 + lap)];
+  }, null, o.normal, o.seed, false);
+}
+
+export type Painted = "stone" | "plaster" | "wood" | "flag" | "sett" | "cobble" | "slate" | "tile" | "brick";
+/** La texture dipinta di quel materiale (la si fa la prima volta che serve: mezzo secondo in tutto). */
+export function paintedTex(scene: Scene, kind: Painted): TexPair {
+  const C = (rows: number, cols: number, gap: number, sq: number, dk: string, md: string, lt: string, joint: string, seed: number, lap?: number): TexPair =>
+    paintedCoursed(scene, `dipinto_${kind}`, { rows, cols, gap, sq, dk: hex(dk), md: hex(md), lt: hex(lt), joint: hex(joint), seed, normal: 5, lap });
+  switch (kind) {
+    case "stone": return C(7, 4, 0.07, 7, "#8a7a66", "#a8967c", "#c4b294", "#4a3d34", 3101);      // i conci dei muri (2,6 m)
+    case "flag": return C(4, 3, 0.04, 12, "#8c8478", "#a59d8e", "#bdb5a4", "#4a443c", 3201);      // le lastre (3 m)
+    case "sett": return C(10, 10, 0.12, 5, "#7d766c", "#979083", "#b0a898", "#3f3a34", 3301);     // i cubetti della piazza (1,6 m)
+    case "cobble": return C(9, 8, 0.12, 2.6, "#86806f", "#a39c88", "#bdb5a0", "#4a4034", 3401);   // i ciottoli (1,6 m)
+    case "slate": return C(9, 9, 0.05, 12, "#4d5560", "#626b78", "#7b8592", "#2a2e34", 3501, 0.5);
+    case "tile": return C(9, 12, 0.08, 5, "#8a4a34", "#a85e42", "#c47a58", "#4a2418", 3601, 0.6);
+    case "brick": return C(12, 6, 0.06, 10, "#7a5644", "#916c58", "#a8846e", "#42302a", 3701);    // il cotto dei pavimenti
+    case "plaster": {   // intonaco: tre toni a chiazze larghe, col bordo netto fra l'una e l'altra
+      const dk = hex("#9c8f74"), md = hex("#b8a988"), lt = hex("#cdbf9f");
+      return tileable(scene, "dipinto_plaster", 512, (u, v) => {
+        const n = fbm2(u * 3, v * 3, 2, 3801, 3, 3) * 0.5 + 0.5, m = fbm2(u * 7, v * 7, 2, 3802, 7, 7) * 0.5 + 0.5;
+        return [n < 0.42 ? dk : n < 0.6 || m < 0.36 ? md : lt, 0.5 + (n < 0.42 ? -0.04 : 0)];
+      }, null, 2, 3803, false);
+    }
+    case "wood": {      // assi lungo v (come le assi generate di prima), ma VECCHIE: grigie più che brune, ognuna col suo tono
+      // spento, la venatura che vaga, un nodo, qualche spacco, le chiazze slavate dove il sole e la pioggia l'hanno consumata,
+      // e le fughe larghe e irregolari di un legno che si è ritirato
+      const dk = hex("#3f342a"), md = hex("#54463a"), lt = hex("#6b5c4c"), grey = hex("#7d7468"), seam = hex("#1c1612");
+      return tileable(scene, "dipinto_wood", 512, (u, v) => {
+        const plank = Math.floor(u * 6), pu = u * 6 - plank, tone = hash2(plank, 3, 3901);
+        const wob = Math.sin((v + plank * 0.37) * Math.PI * 4) * 0.04 + Math.sin((v + plank * 0.11) * Math.PI * 10) * 0.012;
+        let c = tone < 0.4 ? dk : tone < 0.78 ? md : lt;
+        for (const g of [0.22, 0.47, 0.74]) if (Math.abs(pu - g - wob) < 0.016) c = mixc(c, dk, 0.6);              // venature
+        // un nodo per asse: un occhio scuro con l'anello attorno
+        const ky = hash2(plank, 9, 3903), kx = 0.3 + 0.4 * hash2(plank, 11, 3903), dy = Math.min(Math.abs(v - ky), 1 - Math.abs(v - ky)), kd = Math.hypot((pu - kx) / 0.16, dy / 0.035);
+        if (kd < 1) c = kd < 0.45 ? seam : mixc(c, dk, 0.7);
+        // spacchi: tratti scuri sottili lungo la venatura, corti
+        for (const k of [0, 1]) {
+          const sx = 0.15 + 0.7 * hash2(plank, 20 + k, 3904), sy = hash2(plank, 30 + k, 3904), len = 0.06 + 0.1 * hash2(plank, 40 + k, 3904), d = Math.min(Math.abs(v - sy), 1 - Math.abs(v - sy));
+          if (d < len && Math.abs(pu - sx - wob * 0.5) < 0.012 * (1 - d / len) + 0.004) c = seam;
+        }
+        // il consumo: chiazze slavate (grigie) a contorno netto, più verso le teste delle assi
+        const wear = fbm2(u * 5, v * 3, 2, 3905, 5, 3) * 0.5 + 0.5;
+        if (wear > 0.6) c = mixc(c, grey, 0.45);
+        if (pu < 0.08) c = mixc(c, lt, 0.3); else if (pu > 0.92) c = mixc(c, dk, 0.45);                       // lo spigolo in luce e quello in ombra
+        const gw = 0.028 + 0.022 * (fbm2(plank * 3.1, v * 6, 2, 3906, 97, 6) * 0.5 + 0.5), gap = Math.min(pu, 1 - pu) < gw ? 1 : 0;
+        return [mixc(c, seam, gap), 0.6 - gap * 0.6 - (kd < 1 ? 0.15 : 0)];
+      }, null, 5, 3902, false);
+    }
+  }
+}
+
 /** Intonaco sporco, mai bianco: colature dall'alto, macchie di umido, qualche crepa. */
 export function plasterTex(scene: Scene): TexPair {
   const dk = hex("#6e6654"), md = hex("#948a72"), lt = hex("#aba188"), damp = hex("#545340");

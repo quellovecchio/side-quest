@@ -1,12 +1,12 @@
-import { embers, fire, flame } from "./flames";
+import { embers, fire, flame, group } from "./flames";
 import { Color3, Matrix, Mesh, Scene, TransformNode, Vector3, VertexBuffer, VertexData, type Material } from "@babylonjs/core";
 import { by } from "../style";
 import type { DoorDef } from "./doors";
 import type { Geo } from "./geo";
 import type { Floor } from "./levels";
-import { interiorMaterial } from "./materials";
+import { interiorMaterial, onPainted } from "./materials";
 import { TOWN } from "./terrain";
-import { clothTex, dirtTex, leadedGlassTex, photoTex } from "./textures";
+import { clothTex, dirtTex, leadedGlassTex, paintedTex, photoTex, type Painted } from "./textures";
 import type { Interior, Mason, Opt, Tint, V3 } from "./town";
 import type { Collider } from "./vegetation";
 import { LIP, PIECES, caps, face, lamps, layout, point, solids, thick, vanoRect, walls, type Finish, type InteriorKind, type Layout, type Opening, type Piece, type PieceId, type Rect, type Room, type Side, type Stair } from "./layouts";
@@ -52,9 +52,11 @@ const PORTONE = { w: 1.7, h: 2.5, lip: LIP };
 export interface InteriorOptions {
   /** Il nome dell'edificio nel file: i suoi posti si chiamano `<id>.<posto>`. */
   id: string;
-  kind: InteriorKind | "locanda";
+  kind: InteriorKind;
   /** Ingombro dell'edificio (larghezza, profondità) e il seme della sua pianta. */
   size: [number, number]; seed: number;
+  /** Quanto è ingrandito l'edificio (`children[].scale`): la pianta e le altezze lo seguono, gli arredi no. */
+  scale: number;
   /** Un muratore nuovo (town.ts): qui se ne usa uno per l'interno e uno per ogni battente. */
   mason: () => Mason;
   /** Dove sta l'edificio nella città e come è girato. */
@@ -188,7 +190,16 @@ function material(scene: Scene, k: string): Material {
     // le stesse texture fotografiche della città (textures.ts); stoffa, vetri e terra battuta restano generate
     const photo = (id: string) => (sc: Scene) => photoTex(sc, id);
     const tex = { stone: photo("medieval_blocks_05"), plaster: photo("plastered_wall_04"), wood: photo("weathered_planks"), brick: photo("herringbone_brick_02"), iron: photo("rusty_metal_02"), cloth: clothTex, glass: leadedGlassTex, earth: dirtTex, flag: photo("monastery_stone_floor"), thatch: photo("thatch_roof_angled") };
-    for (const [n, t] of Object.entries(tex)) MATS.set(n, interiorMaterial(scene, `interno_${n}`, t(scene), LIGHT));
+    for (const [n, t] of Object.entries(tex)) {
+      const pair = t(scene), m = interiorMaterial(scene, `interno_${n}`, pair, LIGHT);
+      MATS.set(n, m);
+      // col cel shading: la texture dipinta al posto della foto (il colore, e l'altezza che scurisce le fughe: è un campionatore
+      // che il materiale tiene da parte, `_newSamplerInstances`)
+      if (["stone", "plaster", "wood", "brick", "flag"].includes(n)) onPainted((on) => {
+        const p = on ? paintedTex(scene, n as Painted) : pair;
+        m.diffuseTexture = p.albedo; (m as unknown as { _newSamplerInstances: Record<string, unknown> })._newSamplerInstances.sqHeight = p.normal;
+      });
+    }
   }
   return MATS.get(k)!;
 }
@@ -203,6 +214,12 @@ interface Site {
   vis: boolean; small: boolean;
   /** Dal mondo al riferimento dell'edificio; le stanze [x0, z0, x1, z1, y0, y1]; le luci; centro e raggio nel mondo. */
   inv: Matrix; zones: Box[]; lights: Light[]; x: number; z: number; r: number; in: boolean;
+  /** Il suo nome, e se ha finestre aperte sulla strada (allora si disegna anche da fuori, da vicino: `REACH`). */
+  id: string; thru: boolean; told?: number;
+  /** Dove chi cammina prende la luce di dentro, quando non sono le `zones` (vedi `Kit.finish`). */
+  lit?: Box[];
+  /** Dal riferimento dell'edificio al mondo (si calcola la prima volta che serve: `interiorLight`). */
+  out?: Matrix;
 }
 const SITES: Site[] = [];
 let DETAIL = 2;
@@ -215,6 +232,43 @@ let WARMING = false;
 export function warmInteriors(on: boolean): void { WARMING = on; }
 /** Dettaglio degli interni (impostazioni): 0 = senza arredi minuti e accesi solo da vicinissimo, 1 = i minuti solo nell'edificio in cui si è, 2 = tutto. */
 export function setInteriorDetail(level: number): void { DETAIL = level; }
+/**
+ * Da quanti metri (dal muro) si vede dentro dalle finestre: entro questa distanza l'interno sta nella scena anche a porta
+ * chiusa. Più lontano la finestra torna un lume opaco (town.ts). 0 = da fuori mai; da dentro si vede fuori comunque.
+ */
+let REACH = 16;
+export function setWindowReach(m: number): void { REACH = m; }
+/** Chi vuole sapere quanto si vede dentro un interno, da 0 (lontano: non è in scena) a 1 (da vicino): town.ts ci sfuma i lumi opachi delle finestre. */
+let SHOWN: (id: string, k: number) => void = () => {};
+export function onInteriorShown(f: (id: string, k: number) => void): void { SHOWN = f; }
+/** Gli usci sulla strada aperti in questo momento: di chi sono e dove (il cardine). */
+export function openDoors(): { id: string; x: number; y: number; z: number }[] {
+  return FRONT.list.filter((f) => f.open).map((f) => ({ id: f.id, x: f.pivot.position.x, y: f.pivot.position.y, z: f.pivot.position.z }));
+}
+/**
+ * Le luci cotte che fanno ombra a chi sta in (x, y, z): i due fuochi (o candele) che lì danno più luce e la finestra che ne
+ * dà di più, [x, y, z, portata] ciascuno nel mondo (zeri dove non c'è); vuoto all'aperto. Per `setShadeLights` (materials.ts).
+ */
+export function shadeLights(x: number, y: number, z: number): number[] {
+  for (const s of SITES) {
+    if (Math.hypot(x - s.x, z - s.z) > s.r) continue;
+    const p = Vector3.TransformCoordinatesFromFloatsToRef(x, y + 1, z, s.inv, HERE);
+    if (!(s.lit ?? s.zones).some((b) => p.x > b[0] - 0.2 && p.x < b[2] + 0.2 && p.z > b[1] - 0.2 && p.z < b[3] + 0.2 && p.y > b[4] && p.y < b[5] + 0.3)) continue;
+    const w = (l: Light): number => { const d = Math.hypot(l.p[0] - p.x, l.p[1] - p.y, l.p[2] - p.z); return d < l.r ? l.f * (1 - d / l.r) ** 2 : 0; };
+    const by = (win: boolean, n: number): Light[] => s.lights.filter((l) => !!l.n === win && w(l) > 0).sort((a, b) => w(b) - w(a)).slice(0, n);
+    const fires = by(false, 2), out = new Array<number>(12).fill(0);
+    s.out ??= Matrix.Invert(s.inv);
+    [fires[0], fires[1], by(true, 1)[0]].forEach((l, i) => {
+      if (!l) return;
+      const q = Vector3.TransformCoordinatesFromFloatsToRef(l.p[0], l.p[1], l.p[2], s.out!, DIR);
+      out[i * 4] = q.x; out[i * 4 + 1] = q.y; out[i * 4 + 2] = q.z; out[i * 4 + 3] = l.r;
+    });
+    return out;
+  }
+  return [];
+}
+/** Su quanti metri la finestra passa da lume opaco a vetro (avvicinandosi). */
+const FADE = 7;
 /** Di quanto il dettaglio accorcia il raggio a cui gli interni si accendono. */
 export const interiorReach = (): number => [0.5, 0.75, 1][DETAIL];
 
@@ -230,6 +284,8 @@ export class Kit {
   private tmp = new Vector3();
   /** Gli arredi mettono da sé il loro ostacolo (la locanda); nelle piante lo dà `solids`. `plain` = all'aperto, nel muratore della città: niente luce cotta. */
   blocks = false;
+  /** Ha finestre aperte sulla strada. */
+  thru = false;
 
   constructor(readonly scene: Scene, I: Mason, readonly id: string, readonly make: () => Mason, readonly wood: Material | null, readonly plain = false) { this.I = I; }
 
@@ -301,12 +357,13 @@ export class Kit {
     pivot.position.copyFrom(w); pivot.rotation.y = this.yaw + turn;
     L.cell = CELL;
     // la faccia verso cui si apre (sul piano del cardine), la costa libera e, per le porte fra due stanze, l'altra faccia
-    L.poly("wood", [[0, 0, 0], [0, 0, width], [0, height, width], [0, height, 0]], [swing, 0, 0], { tint: PORTA });
-    L.poly("wood", [[0, 0, width], [far, 0, width], [far, height, width], [0, height, width]], [0, 0, 1], { tint: TRAVE });
-    if (!street) L.poly("wood", [[far, 0, 0], [far, 0, width], [far, height, width], [far, height, 0]], [-swing, 0, 0], { tint: PORTA });
-    // ferramenta dalla parte verso cui si apre: le bandelle sui cardini, l'anello
-    for (const hy of height > 2.4 ? [0.36, height / 2, height - 0.36] : [0.44, height - 0.44]) L.box("wood", Math.min(0, swing * 0.014), hy - 0.035, 0, Math.max(0, swing * 0.014), hy + 0.035, width * 0.7, { tint: FERRATO });
-    for (const x of street ? [0] : [0, far]) L.box("wood", x - 0.02, Math.min(height * 0.48, 1.3), width - 0.2, x + 0.02, Math.min(height * 0.48, 1.3) + 0.1, width - 0.1, { tint: FERRATO });
+    // il battente vero (kit): tavole, traverse, bandelle coi chiodi e anello dalla parte verso cui si apre. Il pezzo apre
+    // verso +X: per l'altro verso si gira di mezzo giro. Se dà sulla strada è un po' più sottile, così la faccia di fuori
+    // (che è un'altra mesh, col legno della città) gli resta davanti.
+    const fit: V3 = [(street ? 0.8 : 1) * thick / 0.05, height / 2.1, width], tints = { wood: PORTA, timber: TRAVE, iron: FERRATO };
+    if (swing > 0) L.piece("anta", 0, 0, 0, { size: fit, as: "wood", tint: tints });
+    else L.piece("anta", 0, 0, width, { size: fit, rot: [0, PI, 0], as: "wood", tint: tints });
+    void far;
     const g = gamma(L.geos.get("wood")!), mesh = g.mesh(name, this.scene);
     mesh.material = material(this.scene, "wood"); mesh.parent = pivot; mesh.isPickable = false;
     this.shown.push(mesh); this.pending.push({ g, mesh, pivot, h: A, turn, angle });
@@ -320,14 +377,15 @@ export class Kit {
       W.in(w.x, w.y, w.z, this.yaw + turn, () => W.poly("wood", quad, [-swing, 0, 0], { tint: PORTA }));
       const g = W.geos.get("wood")!, at = FRONT.p.length / 3;
       FRONT.p.push(...g.p); FRONT.n.push(...g.n); FRONT.uv.push(...g.uv); FRONT.c.push(...g.c); FRONT.idx.push(...g.idx.map((i) => i + at));
-      FRONT.list.push({ pivot, shut: pivot.rotation.y, own: out, at, open: false });
+      FRONT.list.push({ pivot, shut: pivot.rotation.y, own: out, at, open: false, id: this.id });
       this.outside.push(out); this.gates.push(pivot);
     }
     return { x: w.x, z: w.z, yaw: this.yaw + turn, width, pivot, swing };
   }
 
   /** Le mesh: una per materiale, con la luce sui vertici; poi l'interno si iscrive fra quelli da accendere e spegnere. `zones` = le sue stanze. */
-  finish(zones: Box[], c: { x: number; z: number }, r: number): Built {
+  /** `lit` = dove vale la luce di dentro, se non coincide con `zones` (il sottosuolo: la zona è larga, la camera no). */
+  finish(zones: Box[], c: { x: number; z: number }, r: number, lit?: Box[]): Built {
     const minor: Mesh[] = [], prefix = this.id === "locanda" ? "inn" : this.id;
     aim(this.lights, this.occ);
     for (const [key, g] of this.I.geos) {
@@ -350,9 +408,9 @@ export class Kit {
     });
     // Nascono nella scena e ci restano finché il gioco non parte: così `scene.whenReadyAsync` (main.ts) compila i loro
     // materiali durante il caricamento, e la prima porta che si apre non si ferma a compilarli. Le toglie `watch` al primo frame.
-    SITES.push({ shown: this.shown, minor, gates: this.gates.map((pivot) => ({ pivot, shut: pivot.rotation.y })), leaves, vis: true, small: true, inv: this.inv, zones, lights: this.lights, x: c.x, z: c.z, r, in: false });
+    SITES.push({ shown: this.shown, minor, gates: this.gates.map((pivot) => ({ pivot, shut: pivot.rotation.y })), leaves, vis: true, small: true, inv: this.inv, zones, lights: this.lights, x: c.x, z: c.z, r, in: false, id: this.id, thru: this.thru, lit });
     watch(this.scene);
-    return { interior: { meshes: [...this.shown, ...minor], x: c.x, z: c.z, r }, meshes: this.outside, colliders: this.I.colliders, floors: this.floors, doors: this.doors, nodes: this.nodes, links: this.links, spots: this.spots };
+    return { interior: { id: this.id, meshes: [...this.shown, ...minor], x: c.x, z: c.z, r }, meshes: this.outside, colliders: this.I.colliders, floors: this.floors, doors: this.doors, nodes: this.nodes, links: this.links, spots: this.spots };
   }
 }
 
@@ -361,7 +419,7 @@ let LUME: Material;
 
 /** Le facce di fuori di tutti i battenti che danno sulla strada, da chiusi: vertici nel mondo, quattro per battente (`at` = il primo). */
 const FRONT = { p: [] as number[], n: [] as number[], uv: [] as number[], c: [] as number[], idx: [] as number[], pos: new Float32Array(0), mesh: null as Mesh | null,
-  list: [] as { pivot: TransformNode; shut: number; own: Mesh; at: number; open: boolean }[] };
+  list: [] as { pivot: TransformNode; shut: number; own: Mesh; at: number; open: boolean; id: string }[] };
 
 /**
  * La mesh comune degli usci chiusi: una sola per tutta la città (a porte chiuse costa una draw call, non una per battente).
@@ -378,7 +436,7 @@ export function doorFronts(scene: Scene, wood: Material): Mesh | null {
   return m;
 }
 
-// A uscio chiuso, da fuori, dell'interno non si vede nulla (le finestre sono opache): le sue mesh non stanno nemmeno nella scena.
+// A uscio chiuso e da lontano, da fuori, dell'interno non si vede nulla (le finestre sono lumi opachi): le sue mesh non stanno nemmeno nella scena.
 // Si aggiunge all'accensione per distanza di main.ts: quella accende e spegne le mesh, questa le mette e le toglie dalla scena.
 // Qui anche la luce delle ante che girano, e la faccia di fuori degli usci (comune da chiusi, del battente da aperti).
 let watching: Scene | null = null;
@@ -402,8 +460,14 @@ function watch(scene: Scene): void {
       const near = !!s.shown[0]?.isEnabled();   // (acceso per distanza: main.ts)
       if (near) Vector3.TransformCoordinatesToRef(cam.globalPosition, s.inv, p);
       s.in = near && s.zones.some((z) => p.x > z[0] - 0.45 && p.x < z[2] + 0.45 && p.z > z[1] - 0.45 && p.z < z[3] + 0.45 && p.y > z[4] - 0.5 && p.y < z[5] + 0.5);
-      const on = WARMING || (near && (s.in || s.gates.some((g) => Math.abs(g.pivot.rotation.y - g.shut) > 0.01))), small = WARMING || (on && (DETAIL > 1 || (DETAIL === 1 && s.in)));
+      // (dalle finestre: `r` è il raggio a cui si accende, 24 m più della mezza diagonale)
+      const gap = s.r - 24 + REACH - Math.hypot(cam.globalPosition.x - s.x, cam.globalPosition.z - s.z), seen = near && s.thru && REACH > 0 && gap > 0;
+      const on = WARMING || (near && (s.in || seen || s.gates.some((g) => Math.abs(g.pivot.rotation.y - g.shut) > 0.01))), small = WARMING || (on && (DETAIL > 1 || (DETAIL === 1 && s.in)));
       if (s.vis !== on) { s.vis = on; for (const m of s.shown) if (on) scene.addMesh(m); else scene.removeMesh(m); }
+      // quanto si vede dentro: l'interno entra in scena col lume ancora opaco, poi avvicinandosi il lume sfuma (niente scatto)
+      // (ha la sua memoria, a parte da `vis`: un interno nasce nella scena, e chi parte lì accanto non lo vedrebbe mai cambiare)
+      const k = !on ? 0 : s.in ? 1 : seen ? Math.min(1, gap / FADE) : 1;
+      if (s.told === undefined || Math.abs(k - s.told) > 0.03 || (k !== s.told && (k === 0 || k === 1))) { s.told = k; SHOWN(s.id, k); }
       if (s.small !== small) { s.small = small; for (const m of s.minor) if (small) scene.addMesh(m); else scene.removeMesh(m); }
       if (on) for (const l of s.leaves) {
         const k = Math.min(1, Math.abs(l.pivot.rotation.y - l.shut) / l.angle);
@@ -417,19 +481,30 @@ function watch(scene: Scene): void {
 
 /**
  * La luce che c'è in un punto del mondo, se sta dentro un interno: [fuoco e candele, finestre] come nei vertici cotti
- * (senza ombre: serve a rischiarare chi ci cammina, vedi npcs.ts), o null se è all'aperto.
+ * (senza ombre: serve a rischiarare chi ci cammina, vedi npcs.ts), o null se è all'aperto. In coda, DA DOVE viene:
+ * il verso medio (nel mondo) verso i fuochi e quello verso le finestre, pesati per quanta luce danno. Con quelli chi sta
+ * dentro ha un lato in luce e uno in ombra, e il volto prende rilievo. Il fuoco conta quanto è acceso (`metadata.warm`).
  */
-const HERE = new Vector3();
-export function interiorLight(x: number, y: number, z: number): [number, number] | null {
+const HERE = new Vector3(), DIR = new Vector3();
+export function interiorLight(x: number, y: number, z: number): number[] | null {
   for (const s of SITES) {
     if (Math.hypot(x - s.x, z - s.z) > s.r) continue;
     const p = Vector3.TransformCoordinatesFromFloatsToRef(x, y + 1, z, s.inv, HERE);
-    if (!s.zones.some((b) => p.x > b[0] - 0.2 && p.x < b[2] + 0.2 && p.z > b[1] - 0.2 && p.z < b[3] + 0.2 && p.y > b[4] && p.y < b[5] + 0.3)) continue;
-    const out: [number, number] = [0, 0];
+    if (!(s.lit ?? s.zones).some((b) => p.x > b[0] - 0.2 && p.x < b[2] + 0.2 && p.z > b[1] - 0.2 && p.z < b[3] + 0.2 && p.y > b[4] && p.y < b[5] + 0.3)) continue;
+    const out = [0, 0, 0, 0, 0, 0, 0, 0];
     for (const l of s.lights) {
       const vx = l.p[0] - p.x, vy = l.p[1] - p.y, vz = l.p[2] - p.z, d = Math.hypot(vx, vy, vz) || 1e-3;
+      if (d >= l.r) continue;
       // (0,5: un corpo in piedi guarda la sorgente solo con mezzo sé)
-      if (d < l.r) out[l.n ? 1 : 0] += l.f * (1 - d / l.r) ** 2 * 0.5 * (l.n ? Math.max(0, -(l.n[0] * vx + l.n[2] * vz) / d) ** 0.6 : 1) * 3 * LIGHT.gain;
+      const w = l.f * (1 - d / l.r) ** 2 * 0.5 * (l.n ? Math.max(0, -(l.n[0] * vx + l.n[2] * vz) / d) ** 0.6 : 1) * 3 * LIGHT.gain, k = l.n ? 1 : 0;
+      out[k] += w; out[2 + k * 3] += vx / d * w; out[3 + k * 3] += vy / d * w; out[4 + k * 3] += vz / d * w;
+    }
+    out[0] *= (s.shown[0]?.metadata?.warm as number | undefined) ?? 1;
+    s.out ??= Matrix.Invert(s.inv);
+    for (const k of [2, 5]) {   // i due versi, nel mondo e di lunghezza uno (o nulli se di lì non arriva niente)
+      Vector3.TransformNormalFromFloatsToRef(out[k], out[k + 1], out[k + 2], s.out, DIR);
+      const n = DIR.length();
+      out[k] = n > 1e-4 ? DIR.x / n : 0; out[k + 1] = n > 1e-4 ? DIR.y / n : 0; out[k + 2] = n > 1e-4 ? DIR.z / n : 0;
     }
     return out;
   }
@@ -456,18 +531,16 @@ function cappa(K: Kit, xb: number, zb: number, yb: number, xt: number, zt: numbe
   for (const s of [-1, 1]) K.I.face("plaster", [[s * xb, yb, 0], [s * xb, yb, zb], [s * xt, yt, zt], [s * xt, yt, 0]], [s, 0.3, 0], { tint: INTONACO });
   K.shade(-xb, yb, 0, xb, yt, zb);
 }
-const candela = (K: Kit): void => {
-  K.I.drum("iron", 0, 0, 0.06, 0, 0.016, { tint: FERRO }, 0.06, 6);
-  K.box("cloth", -0.02, 0.016, -0.02, 0.02, 0.15, 0.02, CERA);
-  fiamma(K, 0, 0.155, 0, 0.017, 0.09);
-};
-const boccale = (K: Kit): void => K.I.drum("wood", 0, 0, 0.045, 0, 0.13, { tint: ASSITO }, 0.045, 6);
-const brocca = (K: Kit): void => { K.I.drum("brick", 0, 0, 0.05, 0, 0.1, { tint: TERRACOTTA }, 0.075, 6); K.I.drum("brick", 0, 0, 0.075, 0.1, 0.24, { tint: TERRACOTTA }, 0.04, 6); };
+const candela = (K: Kit): void => { K.I.piece("bugia", 0, 0, 0, { tint: { iron: FERRO, cloth: CERA } }); fiamma(K, 0, 0.155, 0, 0.017, 0.09); };
+const boccale = (K: Kit): void => K.I.piece("boccale", 0, 0, 0, { tint: ASSITO });
+const brocca = (K: Kit): void => K.I.piece("brocca", 0, 0, 0, { tint: TERRACOTTA });
+/** Un mobile del kit nell'origine del pezzo: le tavole chiare, l'ossatura scura, il ferro; `timber` qui dentro è `wood`. */
+const mobile = (K: Kit, name: Parameters<Mason["piece"]>[0], size?: V3, z = 0): void =>
+  K.I.piece(name, 0, 0, z, { size, as: { timber: "wood" }, tint: { wood: LEGNO, timber: TRAVE, iron: FERRO } });
+/** Una cosa del kit in un materiale solo (pietra, ferro, coccio, panno), con la sua tinta o una per blocco. */
+const cosa = (K: Kit, name: Parameters<Mason["piece"]>[0], tint: Tint | Record<string, Tint>, size?: V3): void => K.I.piece(name, 0, 0, 0, { size, tint, as: { timber: "wood" } });
 /** Una panca lungo x, col centro in (0, z). */
-const panca = (K: Kit, z = 0): void => {
-  K.box("wood", -0.8, 0.37, z - 0.16, 0.8, 0.42, z + 0.16, LEGNO, { under: true });
-  for (const q of [-1, 1]) K.box("wood", q * 0.6 - 0.025, 0, z - 0.13, q * 0.6 + 0.025, 0.37, z + 0.13, TRAVE);
-};
+const panca = (K: Kit, z = 0): void => mobile(K, "panca", undefined, z);
 /** Quattro gambe e i traversi di un tavolo o di un sedile. */
 const gambe = (K: Kit, hx: number, hz: number, h: number, t = 0.06): void => {
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) K.box("wood", sx * hx - t / 2, 0, sz * hz - t / 2, sx * hx + t / 2, h, sz * hz + t / 2, TRAVE);
@@ -476,123 +549,77 @@ const gambe = (K: Kit, hx: number, hz: number, h: number, t = 0.06): void => {
 const sopra = (K: Kit, x: number, y: number, z: number, f: (K: Kit) => void): void => K.minor(() => K.I.in(x, y, z, 0, () => f(K)));
 
 const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void> = {
+  // i mobili di legno sono pezzi del kit (tools/blender/kit.py): tavole smussate, gambe tornite, cavalletti, pomi
   // tavolo di assi su due cavalletti, con le due panche
-  tavolo(K) {
-    K.box("wood", -0.9, 0.7, -0.4, 0.9, 0.76, 0.4, LEGNO, { under: true });
-    for (const s of [-1, 1]) K.box("wood", s * 0.7 - 0.03, 0, -0.3, s * 0.7 + 0.03, 0.7, 0.3, TRAVE);
-    K.box("wood", -0.67, 0.26, -0.04, 0.67, 0.34, 0.04, TRAVE);
-    for (const s of [-1, 1]) panca(K, s * 0.62);
-  },
-  tavolino(K) { K.box("wood", -0.45, 0.68, -0.35, 0.45, 0.72, 0.35, LEGNO, { under: true }); gambe(K, 0.38, 0.28, 0.68); K.box("wood", -0.38, 0.3, -0.03, 0.38, 0.36, 0.03, TRAVE); },
-  tavolone(K) {
-    K.box("wood", -1.8, 0.72, -0.55, 1.8, 0.78, 0.55, LEGNO, { under: true });
-    for (const x of [-1.57, 0, 1.57]) { K.box("wood", x - 0.03, 0, -0.42, x + 0.03, 0.72, 0.42, TRAVE); K.box("wood", x - 0.1, 0, -0.48, x + 0.1, 0.06, 0.48, TRAVE); }
-    K.box("wood", -1.54, 0.28, -0.04, 1.54, 0.36, 0.04, TRAVE);
-  },
+  tavolo(K) { mobile(K, "tavolo"); K.shade(-0.9, 0.7, -0.4, 0.9, 0.76, 0.4); for (const s of [-1, 1]) panca(K, s * 0.62); },
+  tavolino(K) { mobile(K, "tavolo", [0.5, 0.72 / 0.76, 0.875]); },
+  tavolone(K) { mobile(K, "tavolo", [2, 0.78 / 0.76, 1.375]); K.shade(-1.8, 0.72, -0.55, 1.8, 0.78, 0.55); },
   panca: (K) => panca(K),
-  sgabello(K) {
-    K.I.drum("wood", 0, 0, 0.17, 0.37, 0.42, { tint: LEGNO }, 0.17, 8);
-    for (let i = 0; i < 3; i++) { const a = i * 2.094 + 0.5, lx = Math.cos(a) * 0.1, lz = Math.sin(a) * 0.1; K.box("wood", lx - 0.02, 0, lz - 0.02, lx + 0.02, 0.37, lz + 0.02, TRAVE); }
-  },
+  sgabello(K) { mobile(K, "sgabello"); },
   // scranno: chi siede guarda +Z, lo schienale alto sta dietro
-  scranno(K) {
-    for (const s of [-1, 1]) { K.box("wood", s * 0.23 - 0.03, 0, -0.26, s * 0.23 + 0.03, 1.25, -0.2, TRAVE); K.box("wood", s * 0.23 - 0.03, 0, 0.2, s * 0.23 + 0.03, 0.46, 0.26, TRAVE); K.box("wood", s * 0.23 - 0.025, 0.66, -0.2, s * 0.23 + 0.025, 0.7, 0.24, TRAVE); }
-    K.box("wood", -0.26, 0.4, -0.26, 0.26, 0.46, 0.28, LEGNO, { under: true }); K.box("wood", -0.2, 0.62, -0.25, 0.2, 1.18, -0.21, LEGNO); K.box("wood", -0.2, 0.1, 0.21, 0.2, 0.14, 0.25, TRAVE);
-  },
+  scranno(K) { mobile(K, "scranno"); },
   // letto con la testa verso +Z
   letto(K) {
-    for (const s of [-1, 1]) {
-      K.box("wood", s * 0.46 - 0.04, 0, 0.92, s * 0.46 + 0.04, 0.95, 1, TRAVE); K.box("wood", s * 0.46 - 0.04, 0, -1, s * 0.46 + 0.04, 0.65, -0.92, TRAVE);
-      K.box("wood", s * 0.48 - 0.02, 0.25, -0.92, s * 0.48 + 0.02, 0.45, 0.92, LEGNO, { under: true });
-    }
-    K.box("wood", -0.42, 0.45, 0.94, 0.42, 0.9, 0.98, LEGNO); K.box("wood", -0.42, 0.25, -0.98, 0.42, 0.6, -0.94, LEGNO);
+    mobile(K, "letto"); K.shade(-0.48, 0.25, -0.95, 0.48, 0.45, 0.95);
     K.box("cloth", -0.46, 0.3, -0.92, 0.46, 0.5, 0.92, PAGLIA);     // il pagliericcio
     K.box("cloth", -0.3, 0.5, 0.5, 0.3, 0.58, 0.88, BIANCO);        // il cuscino
     K.box("cloth", -0.47, 0.5, -0.93, 0.47, 0.535, 0.3, LANA);      // la coperta
   },
   // letto grande: quattro colonne e il cielo di panno; la testa verso +Z
   lettone(K) {
-    for (const sx of [-1, 1]) {
-      for (const sz of [-1, 1]) K.box("wood", sx * 0.76 - 0.04, 0, sz * 1.01 - 0.04, sx * 0.76 + 0.04, 1.9, sz * 1.01 + 0.04, TRAVE);
-      K.box("wood", sx * 0.78 - 0.02, 0.25, -0.97, sx * 0.78 + 0.02, 0.45, 0.97, LEGNO, { under: true });
-      K.box("cloth", sx * 0.78 - 0.015, 1.68, -1.05, sx * 0.78 + 0.015, 1.92, 1.05, VINO, { under: true });                                    // le falde del cielo
-    }
+    mobile(K, "lettone"); K.shade(-0.78, 0.25, -1, 0.78, 0.45, 1);   // il telaio a colonne tornite (kit)
+    for (const sx of [-1, 1]) K.box("cloth", sx * 0.78 - 0.015, 1.68, -1.05, sx * 0.78 + 0.015, 1.92, 1.05, VINO, { under: true });                                    // le falde del cielo
     for (const sz of [-1, 1]) K.box("cloth", -0.8, 1.68, sz * 1.03 - 0.015, 0.8, 1.92, sz * 1.03 + 0.015, VINO, { under: true });
     K.box("cloth", -0.8, 1.9, -1.05, 0.8, 1.93, 1.05, VINO, { under: true });
-    K.box("wood", -0.72, 0.45, 0.98, 0.72, 1.2, 1.02, LEGNO); K.box("wood", -0.72, 0.25, -1.02, 0.72, 0.6, -0.98, LEGNO);
     K.box("cloth", -0.76, 0.3, -0.97, 0.76, 0.52, 0.97, LINO);
     for (const s of [-1, 1]) K.box("cloth", s * 0.38 - 0.28, 0.52, 0.55, s * 0.38 + 0.28, 0.6, 0.92, BIANCO);
     K.box("cloth", -0.77, 0.52, -0.98, 0.77, 0.56, 0.35, VINO);
   },
   // forziere col coperchio a falde; il davanti (la serratura) guarda −Z: nelle piante lo si gira di mezzo giro
-  forziere(K) {
-    K.box("wood", -0.45, 0, -0.25, 0.45, 0.34, 0.25, LEGNO, { open: true });
-    for (const s of [-1, 1]) {
-      K.I.face("wood", [[-0.45, 0.34, s * 0.25], [0.45, 0.34, s * 0.25], [0.45, 0.5, s * 0.17], [-0.45, 0.5, s * 0.17]], [0, 0.5, s], { tint: ASSITO });
-      K.I.face("wood", [[s * 0.45, 0.34, -0.25], [s * 0.45, 0.34, 0.25], [s * 0.45, 0.5, 0.17], [s * 0.45, 0.5, -0.17]], [s, 0, 0], { tint: ASSITO });
-      K.box("iron", s * 0.28 - 0.03, 0, -0.262, s * 0.28 + 0.03, 0.512, 0.262, FERRO);   // le bandelle
-    }
-    K.I.face("wood", [[-0.45, 0.5, -0.17], [0.45, 0.5, -0.17], [0.45, 0.5, 0.17], [-0.45, 0.5, 0.17]], [0, 1, 0], { tint: ASSITO });
-    K.box("iron", -0.05, 0.2, -0.275, 0.05, 0.36, -0.25, FERRO);                          // la serratura
-  },
+  forziere(K) { mobile(K, "forziere"); },
   // botte in piedi
-  botte(K) {
-    K.I.drum("wood", 0, 0, 0.28, 0, 0.45, { tint: LEGNO }, 0.33); K.I.drum("wood", 0, 0, 0.33, 0.45, 0.9, { tint: LEGNO }, 0.28);
-    for (const h of [0.18, 0.7]) K.I.drum("iron", 0, 0, 0.32, h, h + 0.05, { tint: FERRO }, 0.32);
-  },
-  sacco(K) { K.I.drum("cloth", 0, 0, 0.25, 0, 0.36, { tint: LINO }, 0.21, 7); K.I.drum("cloth", 0, 0, 0.21, 0.36, 0.5, { tint: LINO }, 0.07, 7); K.I.drum("cloth", 0, 0, 0.07, 0.5, 0.56, { tint: LANA }, 0.1, 7); },
+  botte(K) { mobile(K, "botte"); },
+  sacco(K) { cosa(K, "sacco", LINO); },
   // banco di bottega: fronte chiuso di tavole verso +Z, dietro aperto con un ripiano
-  banco(K) {
-    K.box("wood", -0.8, 0, 0.24, 0.8, 0.97, 0.3, ASSITO); for (const s of [-1, 1]) K.box("wood", s * 0.77 - 0.03, 0, -0.3, s * 0.77 + 0.03, 0.97, 0.24, ASSITO);
-    K.box("wood", -0.74, 0.48, -0.26, 0.74, 0.52, 0.24, LEGNO, { under: true }); K.box("wood", -0.85, 0.97, -0.3, 0.85, 1.05, 0.36, LEGNO, { under: true });
-  },
+  banco(K) { mobile(K, "bancone"); K.shade(-0.85, 0.97, -0.3, 0.85, 1.05, 0.36); K.shade(-0.8, 0, 0.24, 0.8, 0.97, 0.3); },
   // scrittoio: chi scrive sta dalla parte di +Z, il piano scende verso di lui
   scrittoio(K) {
-    for (const s of [-1, 1]) K.box("wood", s * 0.57 - 0.03, 0, -0.3, s * 0.57 + 0.03, 0.8, 0.3, TRAVE);
-    K.box("wood", -0.54, 0.2, -0.03, 0.54, 0.26, 0.03, TRAVE); K.box("wood", -0.54, 0.58, -0.3, 0.54, 0.8, 0.3, LEGNO, { under: true });
-    K.I.face("wood", [[-0.62, 0.96, -0.35], [0.62, 0.96, -0.35], [0.62, 0.82, 0.35], [-0.62, 0.82, 0.35]], [0, 1, 0.2], { tint: LEGNO });
-    K.I.face("wood", [[-0.62, 0.96, -0.35], [0.62, 0.96, -0.35], [0.62, 0.8, -0.35], [-0.62, 0.8, -0.35]], [0, 0, -1], { tint: LEGNO });
-    for (const s of [-1, 1]) K.I.face("wood", [[s * 0.62, 0.96, -0.35], [s * 0.62, 0.82, 0.35], [s * 0.62, 0.8, 0.35], [s * 0.62, 0.8, -0.35]], [s, 0, 0], { tint: LEGNO });
+    mobile(K, "scrittoio");
     K.shade(-0.6, 0.58, -0.33, 0.6, 0.86, 0.33);
-    K.minor(() => K.I.face("cloth", [[-0.3, 0.925, -0.15], [0.05, 0.925, -0.15], [0.05, 0.865, 0.15], [-0.3, 0.865, 0.15]], [0, 1, 0.2], { tint: BIANCO }));
+    K.minor(() => K.I.face("cloth", [[-0.3, 0.94, -0.15], [0.05, 0.94, -0.15], [0.05, 0.88, 0.15], [-0.3, 0.88, 0.15]], [0, 1, 0.2], { tint: BIANCO }));
   },
   leggio(K) {
-    K.box("wood", -0.22, 0, -0.22, 0.22, 0.06, 0.22, TRAVE); K.box("wood", -0.04, 0.06, -0.04, 0.04, 1.06, 0.04, TRAVE);
-    K.I.face("wood", [[-0.27, 1.22, -0.2], [0.27, 1.22, -0.2], [0.27, 1.04, 0.2], [-0.27, 1.04, 0.2]], [0, 1, 0.4], { tint: LEGNO });
-    K.minor(() => K.I.face("cloth", [[-0.2, 1.2, -0.13], [0.2, 1.2, -0.13], [0.2, 1.08, 0.13], [-0.2, 1.08, 0.13]], [0, 1, 0.4], { tint: BIANCO }));
+    mobile(K, "leggio");
+    K.minor(() => K.I.face("cloth", [[-0.2, 1.215, -0.13], [0.2, 1.215, -0.13], [0.2, 1.098, 0.13], [-0.2, 1.098, 0.13]], [0, 1, 0.4], { tint: BIANCO }));
   },
   fonte(K) {
-    K.I.drum("stone", 0, 0, 0.4, 0, 0.1, { tint: PIETRA }, 0.4, 8); K.I.drum("stone", 0, 0, 0.24, 0.1, 0.62, { tint: PIETRA }, 0.24, 8);
-    K.I.drum("stone", 0, 0, 0.24, 0.62, 0.8, { tint: MURO }, 0.55, 8); K.I.drum("stone", 0, 0, 0.55, 0.8, 1, { tint: MURO }, 0.55, 8);
-    K.I.drum("iron", 0, 0, 0.47, 0.99, 1.005, { tint: ACQUA }, 0.47, 8);
+    cosa(K, "fonte", PIETRA);
+    K.I.drum("iron", 0, 0, 0.48, 0.965, 0.975, { tint: ACQUA }, 0.48, 16);
     K.shade(-0.4, 0.62, -0.4, 0.4, 1, 0.4);
   },
   // altare di pietra con la tovaglia e due ceri; dietro, sull'asta, il disco d'oro (quello della guglia)
   altare(K) {
-    K.box("stone", -1.2, 0, -0.5, 1.2, 1.05, 0.5, PIETRA);
-    K.box("cloth", -1.25, 0.82, -0.52, 1.25, 1.075, 0.52, BIANCO); K.box("cloth", -1.255, 0.88, -0.525, 1.255, 0.92, 0.525, VINO);
+    cosa(K, "altare", PIETRA); K.shade(-1.2, 0, -0.5, 1.2, 1.05, 0.5);
+    K.box("cloth", -1.27, 0.86, -0.57, 1.27, 1.075, 0.57, BIANCO); K.box("cloth", -1.275, 0.9, -0.575, 1.275, 0.94, 0.575, VINO);
     K.box("iron", -0.02, 1.075, -0.36, 0.02, 1.85, -0.32, FERRO);
     for (const z of [-0.33, -0.35]) K.I.in(0, 0, z, 0, () => K.I.disc("cloth", 0, 2.12, 0.32, 0, { tint: ORO }, 16));
     for (const s of [-1, 1]) K.I.in(s * 0.92, 1.075, 0.1, 0, () => { K.I.drum("iron", 0, 0, 0.06, 0, 0.02, { tint: FERRO }, 0.06, 6); K.box("cloth", -0.025, 0.02, -0.025, 0.025, 0.25, 0.025, CERA); fiamma(K, 0, 0.255, 0, 0.02, 0.1); });
   },
   // banco di chiesa: chi siede guarda +Z
   "banco.chiesa"(K) {
-    K.box("wood", -0.85, 0.4, -0.14, 0.85, 0.45, 0.24, LEGNO, { under: true }); K.box("wood", -0.85, 0.45, -0.2, 0.85, 0.9, -0.14, LEGNO);
-    for (const s of [-1, 1]) K.box("wood", s * 0.82 - 0.03, 0, -0.2, s * 0.82 + 0.03, 0.9, 0.24, TRAVE);
-    K.box("wood", -0.82, 0.08, 0.4, 0.82, 0.12, 0.54, LEGNO, { under: true });
+    mobile(K, "bancochiesa"); K.shade(-0.85, 0.45, -0.2, 0.85, 0.9, -0.14);
   },
   // pilastro ottagono su un plinto, alto v
   pilastro(K, v = 3) {
-    K.box("stone", -0.55, 0, -0.55, 0.55, 0.22, 0.55, PIETRA); K.I.drum("stone", 0, 0, 0.45, 0.22, v - 0.45, { tint: MURO }, 0.45, 8); K.box("stone", -0.55, v - 0.45, -0.55, 0.55, v, 0.55, PIETRA, { under: true });
+    cosa(K, "plinto", PIETRA); K.I.drum("stone", 0, 0, 0.45, 0.5, v - 0.6, { tint: MURO }, 0.45, 8); K.I.piece("capitello", 0, v - 0.6, 0, { tint: PIETRA });   // base e capitello scolpiti (kit), il fusto lungo quanto serve
     K.shade(-0.38, 0.22, -0.38, 0.38, v, 0.38);
   },
   candeliere(K) {
-    K.I.drum("iron", 0, 0, 0.14, 0, 0.1, { tint: FERRATO }, 0.04, 6); K.box("iron", -0.02, 0.1, -0.02, 0.02, 1.5, 0.02, FERRATO); K.I.drum("iron", 0, 0, 0.09, 1.5, 1.53, { tint: FERRATO }, 0.09, 6);
+    cosa(K, "candeliere", FERRATO);
     K.box("cloth", -0.03, 1.53, -0.03, 0.03, 1.75, 0.03, CERA); fiamma(K, 0, 1.755, 0, 0.022, 0.11);
   },
   braciere(K) {
-    for (let i = 0; i < 3; i++) { const a = i * 2.094, x = Math.cos(a) * 0.2, z = Math.sin(a) * 0.2; K.box("iron", x - 0.015, 0, z - 0.015, x + 0.015, 0.46, z + 0.015, FERRATO); }
-    K.I.drum("iron", 0, 0, 0.2, 0.44, 0.7, { tint: FERRATO }, 0.32, 8);
+    cosa(K, "braciere", FERRATO);
     embers(K.I.world(0, 0.66, 0), 0.27);
     fire(K.I.world(0, 0.7, 0), 0.42, 0.4, K.plain ? 1 : 0.12);
   },
@@ -605,9 +632,7 @@ const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void
   },
   // scaffale: lo schienale sul muro, il davanti guarda +Z. v = cosa c'è sopra: 0 stoviglie, 1 libri e carte, 2 roba di casa
   scaffale(K, v = 0) {
-    K.box("wood", -0.7, 0, 0, 0.7, 1.9, 0.03, SCURO);
-    for (const s of [-1, 1]) K.box("wood", s * 0.675 - 0.025, 0, 0.03, s * 0.675 + 0.025, 1.9, 0.4, LEGNO);
-    for (const h of [0.08, 0.52, 0.98, 1.44, 1.86]) K.box("wood", -0.65, h, 0.03, 0.65, h + 0.04, 0.4, LEGNO, { under: true });
+    mobile(K, "scaffale"); K.shade(-0.7, 0, 0, 0.7, 1.9, 0.4);
     K.minor(() => {
       if (v === 1) {   // file di libri, qualcuno coricato, rotoli
         for (const [h, n] of [[0.56, 7], [1.02, 9], [1.48, 6]]) for (let i = 0; i < n; i++) K.box("cloth", -0.6 + i * 0.11, h, 0.1, -0.52 + i * 0.11, h + 0.22 + (i * 7 % 5) * 0.025, 0.34, [VINO, CUOIO, MUSCHIO, LANA][(i + n) % 4]);
@@ -624,9 +649,7 @@ const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void
     });
   },
   armadio(K) {
-    K.box("wood", -0.6, 0.08, 0, 0.6, 1.84, 0.48, LEGNO); K.box("wood", -0.63, 0, 0, 0.63, 0.08, 0.5, TRAVE); K.box("wood", -0.64, 1.84, 0, 0.64, 1.94, 0.52, TRAVE);
-    K.box("wood", -0.012, 0.08, 0.48, 0.012, 1.84, 0.487, SCURO);
-    for (const s of [-1, 1]) { for (const h of [0.4, 1.5]) K.box("iron", s * 0.58 - 0.02, h, 0.48, s * 0.36, h + 0.04, 0.492, FERRATO); K.box("iron", s * 0.06 - 0.02, 0.92, 0.48, s * 0.06 + 0.02, 1.02, 0.5, FERRATO); }
+    K.I.piece("armadio", 0, 0, 0, { as: { timber: "wood" }, tint: { wood: LEGNO, timber: TRAVE, iron: FERRATO } }); K.shade(-0.6, 0, 0, 0.6, 1.9, 0.48);
   },
   // catasta di legna fra due pali
   legna(K) {
@@ -678,10 +701,9 @@ const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void
   candelabro(K, v = 1) {
     K.I.in(0, 0, 0, 0, () => {
       for (let i = 0; i < 8; i++) K.I.in(0, 0, 0, i * PI / 4, () => {
-        K.box("wood", -0.25 * v, 0, 0.52 * v, 0.25 * v, 0.08, 0.52 * v + 0.08, TRAVE, { under: true });   // un lato della ruota
-        K.box("iron", 0.2 * v, 0.08, 0.52 * v, 0.2 * v + 0.08, 0.095, 0.52 * v + 0.08, FERRO); K.box("cloth", 0.2 * v + 0.025, 0.095, 0.52 * v + 0.025, 0.2 * v + 0.055, 0.21, 0.52 * v + 0.055, CERA); fiamma(K, 0.2 * v + 0.04, 0.215, 0.52 * v + 0.04, 0.014, 0.075);
+        K.box("cloth", 0.2 * v + 0.025, 0.095, 0.52 * v + 0.025, 0.2 * v + 0.055, 0.21, 0.52 * v + 0.055, CERA); fiamma(K, 0.2 * v + 0.04, 0.215, 0.52 * v + 0.04, 0.014, 0.075);
       });
-      for (const a of [0, PI / 2]) K.I.in(0, 0, 0, a, () => K.box("wood", -0.56 * v, 0.01, -0.03, 0.56 * v, 0.07, 0.03, TRAVE, { under: true }));
+      K.I.piece("lumiera", 0, 0, 0, { size: [v, 1, v], as: { timber: "wood" }, tint: { timber: TRAVE, iron: FERRO } });   // il cerchio, la croce, i piattelli (kit)
       const top = v > 1 ? 5.2 : 1.17;
       for (let i = 0; i < 3; i++) { const a = i * 2.094; K.I.poly("iron", [[Math.cos(a) * 0.52 * v, 0.08, Math.sin(a) * 0.52 * v], [Math.cos(a + 0.05) * 0.52 * v, 0.08, Math.sin(a + 0.05) * 0.52 * v], [0.01, 0.8, 0.01], [0, 0.8, 0]], [-Math.sin(a), 0, Math.cos(a)], { tint: FERRATO }); }
       K.box("iron", -0.01, 0.8, -0.01, 0.01, top, 0.01, FERRATO);
@@ -689,11 +711,11 @@ const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void
   },
   candela,
   // paiolo alla catena, sopra il fuoco
-  paiolo(K) { K.I.drum("iron", 0, 0, 0.17, 0.62, 0.94, { tint: FERRATO }, 0.26, 8); K.box("iron", -0.008, 0.94, -0.008, 0.008, 1.6, 0.008, FERRO); },
+  paiolo(K) { cosa(K, "paiolo", FERRATO); K.box("iron", -0.008, 0.94, -0.008, 0.008, 1.6, 0.008, FERRO); },
   boccale, brocca,
-  ciotola: (K) => K.I.drum("wood", 0, 0, 0.05, 0, 0.06, { tint: ASSITO }, 0.085, 6),
-  cesta(K) { K.I.drum("cloth", 0, 0, 0.19, 0, 0.26, { tint: PAGLIA }, 0.24, 8); },
-  secchio(K) { K.I.drum("wood", 0, 0, 0.13, 0, 0.3, { tint: LEGNO }, 0.16, 8); K.I.drum("iron", 0, 0, 0.145, 0.08, 0.11, { tint: FERRO }, 0.148, 8); },
+  ciotola: (K) => cosa(K, "ciotola", ASSITO),
+  cesta(K) { cosa(K, "cesta", PAGLIA); },
+  secchio(K) { cosa(K, "secchio", { wood: LEGNO, iron: FERRO }); },
   libri(K) { K.box("cloth", -0.14, 0, -0.1, 0.14, 0.05, 0.1, VINO); K.box("cloth", -0.12, 0.05, -0.09, 0.12, 0.09, 0.09, CUOIO); K.box("cloth", -0.13, 0.09, -0.08, 0.11, 0.14, 0.1, MUSCHIO); },
   // ── la fucina (all'aperto, nei materiali della città) ──
   mantice(K) {
@@ -720,8 +742,23 @@ const ARREDI: Record<PieceId, (K: Kit, v: number | undefined, p?: Piece) => void
   },
 };
 
+/**
+ * Gli arredi che si possono usare (letti, forzieri, candele e candelieri): stanno fusi nelle mesh della stanza, quindi di
+ * ognuno si tengono a parte i triangoli (nel mondo) e il centro. Servono a fargli il contorno quando si è a portata (outline.ts).
+ */
+export interface Prop { t: string; x: number; y: number; z: number; pos: number[]; nor: number[]; idx: number[] }
+export const PROPS: Prop[] = [];
+/** L'arredo usabile di quel genere più vicino a un punto, entro `r` metri. */
+export function propNear(x: number, y: number, z: number, kind: RegExp, r: number): Prop | null {
+  let best: Prop | null = null, bd = r;
+  for (const p of PROPS) { const d = Math.hypot(p.x - x, p.y - y, p.z - z); if (d < bd && kind.test(p.t)) { bd = d; best = p; } }
+  return best;
+}
+
 /** Posa un pezzo: lo mette nel suo riferimento (i minuti nelle mesh a parte) e, se il cantiere lo vuole, ne aggiunge l'ostacolo. */
 function put(K: Kit, t: PieceId, x: number, y: number, z: number, turn = 0, v?: number, p?: Piece): void {
+  const track = !K.plain && /letto|forziere|candel|lumiera|bugia/.test(t), before = new Map<string, [number, number]>();
+  if (track) for (const [k, g] of K.I.geos) before.set(k, [g.p.length / 3, g.idx.length]);
   const d = PIECES[t] as { foot: Rect | number; h: number; minor?: boolean }, draw = (): void => K.I.in(x, y, z, turn, () => {
     ARREDI[t](K, v, p);
     if (!K.blocks || !d.h) return;
@@ -729,6 +766,17 @@ function put(K: Kit, t: PieceId, x: number, y: number, z: number, turn = 0, v?: 
     for (const s of caps(r[0], r[1], r[2], r[3], 0, h, typeof f === "number")) K.I.seg(s.ax, s.az, s.bx, s.bz, s.r, s.y0, s.y1);
   });
   if (d.minor) K.minor(draw); else draw();
+  if (!track) return;
+  const pr: Prop = { t, x: 0, y: 0, z: 0, pos: [], nor: [], idx: [] };
+  for (const [k, g] of K.I.geos) {
+    const [v0, i0] = before.get(k) ?? [0, 0], base = pr.pos.length / 3;
+    for (let i = v0 * 3; i < g.p.length; i++) { pr.pos.push(g.p[i]); pr.nor.push(g.n[i]); }
+    for (let i = i0; i < g.idx.length; i++) pr.idx.push(g.idx[i] - v0 + base);
+  }
+  const n = pr.pos.length / 3;
+  if (!n) return;
+  for (let i = 0; i < n; i++) { pr.x += pr.pos[i * 3] / n; pr.y += pr.pos[i * 3 + 1] / n; pr.z += pr.pos[i * 3 + 2] / n; }
+  PROPS.push(pr);
 }
 
 /** Gli arredi di una pianta. Il forziere ha la serratura dalla parte di −Z: lo si gira. */
@@ -756,6 +804,29 @@ export function furnish(scene: Scene, M: Mason, L: Layout, id: string): Pick<Bui
 /** Verso cui guarda chi esce da un muro (lo yaw del riferimento di un vano: +Z entra nel muro, +X corre lungo il muro). */
 const OUT: Record<Side, number> = { "z+": 0, "x+": PI / 2, "z-": PI, "x-": -PI / 2 };
 const OPP: Record<Side, Side> = { "x-": "x+", "x+": "x-", "z-": "z+", "z+": "z-" };
+const RAIL = 0.88;
+/**
+ * Il parapetto di una rampa che sale verso +Z, sul fianco a `x` (kit): un montante sul primo e sull'ultimo gradino, un
+ * colonnino tornito su ogni gradino in mezzo, il corrimano dall'uno all'altro montante, poggiato sui colonnini.
+ */
+function stairRail(I: Mason, x: number, y0: number, alz: number, ped: number, n: number): void {
+  const last = n - 2, at = (i: number): [number, number] => [y0 + (i + 1) * alz, (i + 0.5) * ped];
+  for (const i of [0, last]) I.piece("montante", x, at(i)[0], at(i)[1], { tint: TRAVE, as: "wood" });
+  for (let i = 1; i < last; i++) I.piece("colonnino", x, at(i)[0], at(i)[1], { size: [1, RAIL / 0.85, 1], tint: LEGNO, as: "wood" });
+  const [ya, za] = at(0), [yb, zb] = at(last);
+  I.piece("corrimano", x, ya + RAIL, za, { size: [1, 1, Math.hypot(zb - za, yb - ya)], rot: [-Math.atan2(yb - ya, zb - za), 0, 0], tint: TRAVE, as: "wood" });
+}
+
+/** Un parapetto in piano da (ax, az) a (bx, bz), a quota y (kit): montanti ai capi (e ogni due metri), colonnini ogni 16 cm, corrimano sopra. */
+function levelRail(I: Mason, ax: number, az: number, bx: number, bz: number, y: number): void {
+  const len = Math.hypot(bx - ax, bz - az), posts = Math.max(1, Math.round(len / 2));
+  I.in(ax, y, az, Math.atan2(bx - ax, bz - az), () => {
+    for (let i = 0; i <= posts; i++) I.piece("montante", 0, 0, len * i / posts, { tint: TRAVE, as: "wood" });
+    for (let z = 0.16; z < len - 0.1; z += 0.16) if (Math.abs((z / (len / posts)) - Math.round(z / (len / posts))) * (len / posts) > 0.1) I.piece("colonnino", 0, 0, z, { size: [1, RAIL / 0.85, 1], tint: LEGNO, as: "wood" });
+    I.piece("corrimano", 0, RAIL, 0, { size: [1, 1, len], tint: TRAVE, as: "wood" });
+  });
+}
+
 /** Lo yaw del riferimento in cui una rampa sale verso +Z. */
 const UP = OUT;
 
@@ -823,10 +894,12 @@ function build(K: Kit, L: Layout): void {
     };
     I.in(px, r.y + o.y0, pz, OUT[o.side], () => {
       if (o.kind === "finestra") {   // una nicchia e, in fondo, i vetri piombati (opachi: da fuori non si vede dentro)
-        const d = Math.min(0.28, t - 0.1);   // i vetri stanno più dentro della finestra finta che si vede da fuori
+        // una finestra aperta (`deep`) arriva fino al vetro della facciata, che è della città: di qui si vede la strada.
+        // Le altre restano chiuse da vetri opachi, più dentro della finestra che si vede da fuori (lo controlla vetri.check.mjs)
+        const see = o.deep !== undefined, d = see ? o.deep! : Math.min(0.24, t - 0.12);
         for (const s of [-1, 1]) I.poly(wk, [[s * hw, 0, 0], [s * hw, 0, d], [s * hw, h, d], [s * hw, h, 0]], [-s, 0, 0], { tint: wt });
         I.poly(wk, [[-hw, 0, 0], [hw, 0, 0], [hw, 0, d], [-hw, 0, d]], [0, 1, 0], { tint: wt }); I.poly(wk, [[-hw, h, 0], [hw, h, 0], [hw, h, d], [-hw, h, d]], [0, -1, 0], { tint: wt });
-        if (o.arch) { I.arch("glass", 0, 0, o.w, h, d); arcata(d - 0.005, 0, h, h, -1); } else I.poly("glass", [[-hw, 0, d], [hw, 0, d], [hw, h, d], [-hw, h, d]], [0, 0, -1]);
+        if (o.arch) { if (!see) I.arch("glass", 0, 0, o.w, h, d); arcata(d - 0.005, 0, h, h, -1); } else if (!see) I.poly("glass", [[-hw, 0, d], [hw, 0, d], [hw, h, d], [-hw, h, d]], [0, 0, -1]);
         return;
       }
       const usc = o.kind === "uscio", jw = usc ? hw + 0.1 : hw, top = usc ? h + 0.24 : h, zl = usc ? t - LIP : t;
@@ -864,7 +937,7 @@ function build(K: Kit, L: Layout): void {
         const z = i * ped, top = s.y0 + (i + 1) * alz;
         I.poly("wood", [[-hw, top - alz, z], [hw, top - alz, z], [hw, top, z], [-hw, top, z]], [0, 0, -1], { tint: TRAVE });
         if (i === s.n - 1) break;
-        I.poly("wood", [[-hw, top, z], [hw, top, z], [hw, top, z + ped], [-hw, top, z + ped]], [0, 1, 0], { tint: ASSITO });
+        I.piece("gradino", 0, top, z, { size: [2 * hw, 1, ped / 0.3], tint: ASSITO, as: "wood" });   // la pedata vera, col naso che sporge (kit)
         for (const q of open) I.poly("wood", [[q * hw, s.under ? s.y0 : top - alz - 0.2, z], [q * hw, s.under ? s.y0 : top - 0.2, z + ped], [q * hw, top, z + ped], [q * hw, top, z]], [q, 0, 0], { tint: ASSITO });
         if (i % 2 === 0) K.shade(-hw, s.under ? s.y0 : top - 0.25, z, hw, top + alz, z + 2 * ped);
       }
@@ -873,11 +946,12 @@ function build(K: Kit, L: Layout): void {
       // corrimano sui fianchi aperti; attorno al vano, di sopra, il parapetto
       for (const q of open) {
         const x = q * (hw - 0.04);
-        for (let i = 0; i < s.n - 1; i += 4) K.box("wood", x - 0.04, s.y0 + (i + 1) * alz, i * ped + 0.02, x + 0.04, s.y0 + (i + 1) * alz + 0.95, i * ped + 0.1, TRAVE);
-        K.box("wood", x - 0.04, (s.y0 + s.y1) / 2 + 0.92, 0, x + 0.04, (s.y0 + s.y1) / 2 + 0.98, Math.hypot(run, s.y1 - s.y0 - alz), TRAVE, { under: true, rot: [-Math.atan2(s.y1 - s.y0 - alz, run), 0, 0] });
-        if (cut > 0) { for (let z = cut; z < run - 0.3; z += 1.2) K.box("wood", x - 0.04, s.y1, z, x + 0.04, s.y1 + 0.98, z + 0.08, TRAVE); for (const hh of [0.45, 0.92]) K.box("wood", x - 0.04, s.y1 + hh, cut, x + 0.04, s.y1 + hh + 0.06, run, TRAVE, { under: true }); }
+        // il parapetto vero (kit): un montante sul primo e sull'ultimo gradino, un colonnino tornito su ogni gradino in
+        // mezzo, e il corrimano che corre dall'uno all'altro montante poggiando sui colonnini — niente più tavole per aria
+        stairRail(I, x, s.y0, alz, ped, s.n);
+        if (cut > 0) levelRail(I, x, cut, x, run, s.y1);
       }
-      if (cut > 0) { for (const q of [-1, 0, 1]) K.box("wood", q * (hw - 0.04) - 0.04, s.y1, cut - 0.08, q * (hw - 0.04) + 0.04, s.y1 + 0.98, cut, TRAVE); for (const hh of [0.45, 0.92]) K.box("wood", -hw, s.y1 + hh, cut - 0.08, hw, s.y1 + hh + 0.06, cut, TRAVE, { under: true }); }
+      if (cut > 0) levelRail(I, -hw + 0.04, cut - 0.04, hw - 0.04, cut - 0.04, s.y1);
       // la rampa passa a metà di ogni gradino: comincia e finisce mezza alzata dentro i due pavimenti
       K.floor(-hw, 0, hw, run, (s.y0 + s.y1) / 2, s.under ? undefined : 0.25, s.y1 - s.y0 - alz);
     });
@@ -891,9 +965,7 @@ function build(K: Kit, L: Layout): void {
   }
   for (const d of L.steps) K.floor(d.rect[0], d.rect[1], d.rect[2], d.rect[3], d.y);
   for (const c of L.rails) {
-    const y = c.y0 + 0.25, n = Math.max(1, Math.round(Math.hypot(c.bx - c.ax, c.bz - c.az) / 1.1));
-    for (let i = 0; i <= n; i++) { const x = c.ax + (c.bx - c.ax) * i / n, z = c.az + (c.bz - c.az) * i / n; K.box("wood", x - 0.04, y, z - 0.04, x + 0.04, y + 0.98, z + 0.04, TRAVE); }
-    for (const hh of [0.45, 0.92]) K.box("wood", Math.min(c.ax, c.bx) - 0.04, y + hh, Math.min(c.az, c.bz) - 0.04, Math.max(c.ax, c.bx) + 0.04, y + hh + 0.06, Math.max(c.az, c.bz) + 0.04, TRAVE, { under: true });
+    levelRail(I, c.ax, c.az, c.bx, c.bz, c.y0 + 0.25);
   }
 
   furnishAll(K, L);
@@ -903,250 +975,18 @@ function build(K: Kit, L: Layout): void {
   for (const [a, b] of L.links) K.link(a, b);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LA LOCANDA — fatta a mano dalle tavole interni-1-locanda e interni-2-arredi (è stata la pilota degli interni).
-// Piano terra: la sala (focolare a −X, bancone e cucina a +X, scala lungo il muro di fondo). Primo piano: corridoio e tre camere. Sopra è chiuso.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// faccia interna dei muri, pavimenti, sotto il tavolato e sotto le travi (piano terra), soffitto e travi del primo piano
-const IW = 4.1, Y0 = 0.12, Y1 = 3.52, DECK = 3.42, BEAM = 3.2, CEIL = 6.49, BEAM1 = 6.3;
-/** La rampa lungo il muro di fondo: piede, cima, larghezza, dove comincia il vano nel solaio, alzate. */
-const STAIR = { x0: -2, x1: 2.8, z0: -IW, z1: -2.9, vano: -0.8, n: 17 };
-const TABLES: [number, number][] = [[-0.5, -2], [-3, 3.3], [3, 3.3]];
-/** Le camere: da x a x, centro della porta, cardine, letto, centro, sgabello. */
-const ROOMS = [[-IW, -1.4, -2.1, -1.5, -3.55, -2.2, -2.75], [-1.1, 1.1, -0.4, -1, 0.55, -0.45, -0.75], [1.4, IW, 2.1, 1.5, 3.55, 2.2, 2.75]];
-
-function locanda(K: Kit): void {
-  const I = K.I;
-  K.blocks = true;
-  const box = (k: string, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, tint: Tint, o: Opt = {}): void => K.box(k, x0, y0, z0, x1, y1, z1, tint, o);
-  const light = (x: number, y: number, z: number, r: number, f: number, cold = false): void => K.light(x, y, z, r, f, cold ? [0, 0, -1] : undefined);
-  const floor = (x0: number, z0: number, x1: number, z1: number, y: number, thick?: number): void => K.floor(x0, z0, x1, z1, y, thick);
-  const candelaSu = (x: number, y: number, z: number): void => put(K, "candela", x, y, z);
-  const candelaMuro = (x: number, y: number, z: number, nz: number): void => put(K, "candela.muro", x, y, z, nz > 0 ? 0 : PI);
-  const sgabello = (x: number, y: number, z: number): void => put(K, "sgabello", x, y, z);
-  const boccale = (x: number, y: number, z: number): void => put(K, "boccale", x, y, z), brocca = (x: number, y: number, z: number): void => put(K, "brocca", x, y, z);
-  /** Botte da mescita coricata sul cavalletto, col fondo e la spina verso −X. */
-  const botteDaMescita = (z: number): void => {
-    I.in(IW, Y0 + 0.75, z, 0, () => {   // coricata: la y del tamburo va verso −X
-      I.drum("wood", 0, 0, 0.29, 0, 0.45, { tint: LEGNO }, 0.35); I.drum("wood", 0, 0, 0.35, 0.45, 0.9, { tint: LEGNO }, 0.29);
-      for (const [h, r] of [[0.07, 0.305], [0.3, 0.337], [0.56, 0.337], [0.79, 0.305]]) I.drum("iron", 0, 0, r, h, h + 0.045, { tint: FERRO }, r);
-      box("iron", -0.24, 0.9, -0.02, -0.18, 1.02, 0.02, FERRO);
-    }, PI / 2);
-    for (const x of [3.36, 3.86]) box("wood", x, Y0, z - 0.33, x + 0.08, Y0 + 0.5, z + 0.33, TRAVE);
-    box("wood", 3.44, Y0 + 0.1, z - 0.03, 3.86, Y0 + 0.16, z + 0.03, TRAVE);
-    I.seg(3.55, z, 3.75, z, 0.36, Y0, Y0 + 1.2);
-    K.shade(3.2, Y0 + 0.42, z - 0.33, IW, Y0 + 1.1, z + 0.33);
-  };
-
-  // ── piano terra: pavimento, muri, soffitto ──
-  K.slab("brick", Y0, -IW, STAIR.z1, IW, IW, 1, { tint: COTTO }, [[-IW, -1.1, -2.8, 1.1], [3.3, -0.8, IW, 0.8]]);
-  K.slab("brick", Y0, -IW, -IW, STAIR.x0, STAIR.z1, 1, { tint: COTTO }); K.slab("brick", Y0, STAIR.x1, -IW, IW, STAIR.z1, 1, { tint: COTTO });
-  K.panel("stone", "z", -IW, -IW, IW, Y0, Y1, 1, { tint: MURO });
-  K.panel("stone", "x", -IW, -IW, IW, Y0, Y1, 1, { tint: MURO }, [[-1.1, Y0, 1.1, Y0 + 1.55]]);
-  K.panel("stone", "x", IW, -IW, IW, Y0, Y1, -1, { tint: MURO });
-  K.panel("stone", "z", IW, -IW, IW, Y0, Y1, -1, { tint: MURO }, [[-0.95, Y0, 0.95, 2.74], [-3.42, 1.1, -2.52, 2.5], [2.52, 1.1, 3.42, 2.5]]);
-  // sotto il tavolato: tre rettangoli (il resto è il vano della scala), le travi lungo Z, i travetti attorno al vano
-  const soffitto = (x0: number, z0: number, x1: number, z1: number, holes: number[][] = []): void => K.slab("wood", DECK, x0, z0, x1, z1, -1, { tint: SCURO }, holes, true);
-  soffitto(-IW, STAIR.z1, IW, IW, [[-IW, -0.5, -2.8, 0.5], [2.8, -0.5, IW, 0.5]]); soffitto(-IW, -IW, STAIR.vano, STAIR.z1); soffitto(STAIR.x1, -IW, IW, STAIR.z1);
-  for (const x of [-2.4, -1.2, 0, 1.2, 2.4]) box("wood", x - 0.1, BEAM, x < STAIR.vano ? -IW : STAIR.z1 + 0.18, x + 0.1, DECK, IW, TRAVE, { open: true, under: true });
-  box("wood", STAIR.vano, BEAM, STAIR.z1, STAIR.x1, DECK, STAIR.z1 + 0.18, TRAVE, { open: true, under: true });
-  box("wood", STAIR.vano - 0.18, BEAM, -IW, STAIR.vano, DECK, STAIR.z1, TRAVE, { open: true, under: true });
-  box("wood", STAIR.x1, BEAM, -IW, STAIR.x1 + 0.18, DECK, STAIR.z1, TRAVE, { open: true, under: true });
-  K.panel("wood", "z", STAIR.z1, STAIR.vano, STAIR.x1, DECK, Y1, -1, { tint: TRAVE }); K.panel("wood", "x", STAIR.vano, -IW, STAIR.z1, DECK, Y1, 1, { tint: TRAVE });   // il bordo del tavolato sul vano
-
-  // ── finestre: una nicchia nel muro e, in fondo, i vetri piombati (opachi: da fuori non si vede dentro) ──
-  const finestra = (xc: number, w: number, y0: number, y1: number, zo: number, k: string, tint: Tint): void => {
-    const a = xc - w / 2, b = xc + w / 2;
-    I.poly(k, [[a, y0, IW], [a, y0, zo], [a, y1, zo], [a, y1, IW]], [1, 0, 0], { tint }); I.poly(k, [[b, y0, IW], [b, y0, zo], [b, y1, zo], [b, y1, IW]], [-1, 0, 0], { tint });
-    I.poly(k, [[a, y0, IW], [b, y0, IW], [b, y0, zo], [a, y0, zo]], [0, 1, 0], { tint }); I.poly(k, [[a, y1, IW], [b, y1, IW], [b, y1, zo], [a, y1, zo]], [0, -1, 0], { tint });
-    I.poly("glass", [[a, y0, zo], [b, y0, zo], [b, y1, zo], [a, y1, zo]], [0, 0, -1]);
-    light(xc, (y0 + y1) / 2, IW - 0.12, 5.5, 0.9, true);
-  };
-  for (const s of [-1, 1]) finestra(s * 2.97, 0.9, 1.1, 2.5, IW + 0.28, "stone", MURO);
-  for (const s of [-1, 0, 1]) finestra(s * 2.7, 1, 4.2, 6.1, IW + 0.26, "plaster", INTONACO);
-
-  // ── il portone visto da dentro: lo sguancio rettangolare e il rovescio della battuta a sesto acuto ──
-  const { w: pw, h: ph } = PORTONE, zl = 4.5 - PORTONE.lip, pt = 2.74;
-  for (const s of [-1, 1]) {
-    I.poly("stone", [[s * 0.95, Y0, IW], [s * 0.95, Y0, zl], [s * 0.95, pt, zl], [s * 0.95, pt, IW]], [-s, 0, 0], { tint: MURO });
-    I.poly("stone", [[s * pw / 2, Y0, zl], [s * 0.95, Y0, zl], [s * 0.95, pt, zl], [s * pw / 2, pt, zl]], [0, 0, -1], { tint: MURO });
-    for (let i = 0; i < 5; i++) {
-      const a = I.archSide(0, 0, pw, ph, zl, s, i / 5), b = I.archSide(0, 0, pw, ph, zl, s, (i + 1) / 5);
-      I.face("stone", [a, b, [b[0], pt, zl], [a[0], pt, zl]], [0, 0, -1], { tint: MURO });
-    }
-  }
-  I.poly("stone", [[-0.95, pt, IW], [0.95, pt, IW], [0.95, pt, zl], [-0.95, pt, zl]], [0, -1, 0], { tint: MURO });
-  I.poly("stone", [[-0.95, Y0 + 0.002, IW], [0.95, Y0 + 0.002, IW], [0.95, Y0 + 0.002, zl], [-0.95, Y0 + 0.002, zl]], [0, 1, 0], { tint: PIETRA });
-  box("wood", 1.18, Y0, IW - 0.12, 1.3, Y0 + 1.9, IW - 0.02, TRAVE);   // la stanga, tolta e appoggiata al muro finché è giorno
-
-  // ── il focolare della sala (muro −X): piedritti, pietra, architrave, cappa che stringe verso la canna ──
-  for (const s of [-1, 1]) box("stone", -IW, Y0, s > 0 ? 0.75 : -1.1, -2.8, Y0 + 1.55, s > 0 ? 1.1 : -0.75, PIETRA, { open: true });
-  box("stone", -IW, Y0, -0.75, -2.8, Y0 + 0.15, 0.75, PIETRA);
-  K.panel("stone", "x", -IW + 0.01, -0.75, 0.75, Y0 + 0.15, Y0 + 1.6, 1, { tint: FUMO });
-  K.slab("stone", Y0 + 1.6, -IW, -0.75, -3.05, 0.75, -1, { tint: FUMO });   // la gola: nera
-  box("wood", -3.1, Y0 + 1.25, -1.2, -2.74, Y0 + 1.55, 1.2, TRAVE, { under: true });
-  const hood = (x0: number, x1: number, zb: number, zt: number, yb: number, yt: number, facing: 1 | -1): void => {   // cappa a tronco: il davanti e i due fianchi
-    const xf = facing > 0 ? x1 : x0;
-    I.face("plaster", [[xf, yb, -zb], [xf, yb, zb], [xf, yt, zt], [xf, yt, -zt]], [facing, 0, 0], { tint: INTONACO });
-    for (const s of [-1, 1]) I.face("plaster", [[x0, yb, s * zb], [x1, yb, s * zb], [x1, yt, s * zt], [x0, yt, s * zt]], [0, 0.3, s], { tint: INTONACO });
-    K.shade(x0, yb, -zb + 0.15, x1, yt, zb - 0.15);
-  };
-  hood(-IW, -2.8, 1.1, 0.5, Y0 + 1.55, DECK, 1);
-  box("wood", -3.85, Y0 + 0.15, -0.3, -3.05, Y0 + 0.25, -0.16, SCURO); box("wood", -3.8, Y0 + 0.15, 0.12, -3.0, Y0 + 0.25, 0.26, SCURO); box("wood", -3.7, Y0 + 0.25, -0.34, -3.56, Y0 + 0.35, 0.3, SCURO);   // i ciocchi
-  for (const s of [-1, 1]) box("iron", -3.4, Y0 + 0.15, s * 0.56 - 0.02, -3.0, Y0 + 0.42, s * 0.56 + 0.02, FERRO);                                                                                              // gli alari
-  fire(I.world(-3.42, Y0 + 0.31, 0), 0.72, 0.75, 0.12);
-  embers(I.world(-3.42, Y0 + 0.25, 0), 0.36);   // la brace
-  light(-3.1, Y0 + 0.65, 0, 9, 1);
-  I.seg(-2.9, -1, -2.9, 1, 0.1, 0, 3.3); for (const s of [-1, 1]) I.seg(-IW, s, -2.9, s, 0.1, 0, 3.3);   // la bocca è chiusa al passo
-  for (const s of [-1, 1]) sgabello(-2.45, Y0, s * 1.05);
-  // la legna, accatastata fra due pali
-  for (let j = 0; j < 4; j++) for (let i = 0; i < 6; i++) I.in(-IW, Y0 + 0.11 + j * 0.2, -2.52 + i * 0.208 + (j % 2) * 0.05, 0, () => I.drum("wood", 0, 0, 0.1, 0, 0.5, { tint: j % 2 ? LEGNO : ASSITO }, 0.1, 6), -PI / 2);
-  for (const z of [-2.68, -1.3]) box("wood", -3.68, Y0, z, -3.6, Y0 + 0.95, z + 0.08, TRAVE);
-  I.seg(-3.85, -2.4, -3.85, -1.5, 0.25, 0, 1);
-
-  // ── la scala: 17 alzate da 20 cm e 16 pedate da 30, chiusa sotto da un assito; in gioco si sale una rampa ──
-  const ped = (STAIR.x1 - STAIR.x0) / (STAIR.n - 1), alz = (Y1 - Y0) / STAIR.n;
-  for (let i = 0; i < STAIR.n; i++) {
-    const x = STAIR.x0 + i * ped, top = Y0 + (i + 1) * alz;
-    I.poly("wood", [[x, top - alz, STAIR.z0], [x, top - alz, STAIR.z1], [x, top, STAIR.z1], [x, top, STAIR.z0]], [-1, 0, 0], { tint: TRAVE });
-    if (i === STAIR.n - 1) break;
-    I.poly("wood", [[x, top, STAIR.z0], [x + ped, top, STAIR.z0], [x + ped, top, STAIR.z1], [x, top, STAIR.z1]], [0, 1, 0], { tint: ASSITO });
-    I.poly("wood", [[x, Y0, STAIR.z1], [x + ped, Y0, STAIR.z1], [x + ped, top, STAIR.z1], [x, top, STAIR.z1]], [0, 0, 1], { tint: ASSITO });
-    if (i % 2 === 0) K.shade(x, Y0, STAIR.z0, x + 2 * ped, top, STAIR.z1);
-  }
-  K.panel("wood", "x", STAIR.x1, STAIR.z0, STAIR.z1, Y0, DECK, 1, { tint: ASSITO });
-  // parapetti: sulla scala (colonnini e corrimano inclinato) e attorno al vano, al primo piano
-  for (let i = 0; i < 16; i += 4) box("wood", STAIR.x0 + i * ped + 0.02, Y0 + (i + 1) * alz, STAIR.z1 - 0.08, STAIR.x0 + i * ped + 0.1, Y0 + (i + 1) * alz + 0.95, STAIR.z1, TRAVE);
-  box("wood", 0.4 - 2.9, Y0 + 2.72, STAIR.z1 - 0.08, 0.4 + 2.9, Y0 + 2.78, STAIR.z1, TRAVE, { under: true, rot: [0, 0, Math.atan2((STAIR.n - 1) * alz, STAIR.x1 - STAIR.x0)] });
-  for (const x of [STAIR.vano, 0.4, 1.6, STAIR.x1]) box("wood", x - 0.04, Y1, STAIR.z1, x + 0.04, Y1 + 0.98, STAIR.z1 + 0.08, TRAVE);
-  for (const h of [0.45, 0.92]) box("wood", STAIR.vano - 0.04, Y1 + h, STAIR.z1, STAIR.x1 + 0.04, Y1 + h + 0.06, STAIR.z1 + 0.08, TRAVE, { under: true });
-  box("wood", STAIR.vano - 0.08, Y1, -IW, STAIR.vano, Y1 + 0.98, -IW + 0.08, TRAVE);
-  for (const h of [0.45, 0.92]) box("wood", STAIR.vano - 0.08, Y1 + h, -IW, STAIR.vano, Y1 + h + 0.06, STAIR.z1, TRAVE, { under: true });
-  I.seg(STAIR.x0, STAIR.z1 - 0.04, STAIR.vano, STAIR.z1 - 0.04, 0.06, 0, 2.2);            // il fianco della scala sotto il ripostiglio
-  I.seg(STAIR.vano, STAIR.z1, STAIR.x1, STAIR.z1, 0.07, 0, Y1 + 1);                         // il fianco e, sopra, il parapetto del vano: chi lo scavalca cade sulla rampa
-  I.seg(STAIR.vano - 0.04, -IW, STAIR.vano - 0.04, STAIR.z1, 0.06, Y1, Y1 + 1);
-  I.seg(STAIR.x1, -IW, STAIR.x1, STAIR.z1, 0.05, 0, 3.15);                                  // il fondo del sottoscala (chi sale ci passa sopra)
-  candelaMuro(0.4, 3.56, -IW, 1); light(0.4, 3.66, -IW + 0.2, 4, 0.45);
-  put(K, "botte", 3.72, Y0, -3.72); box("cloth", 2.9, Y0, -4.0, 3.38, Y0 + 0.5, -3.5, LINO); I.seg(3.15, -3.74, 3.15, -3.74, 0.27, Y0, Y0 + 0.6);   // sotto l'arrivo: una botte, un sacco
-
-  // ── il bancone, le botti da mescita, la cucina (muro +X) ──
-  box("wood", 1.7, Y0, STAIR.z1, 1.76, Y0 + 0.97, 1.1, ASSITO); box("wood", 1.76, Y0, 1.04, 2.3, Y0 + 0.97, 1.1, ASSITO);
-  for (const z of [-2.84, -1.6, -0.3, 0.98]) box("wood", 2.24, Y0, z, 2.3, Y0 + 0.97, z + 0.06, TRAVE);
-  box("wood", 1.76, Y0 + 0.48, STAIR.z1, 2.26, Y0 + 0.52, 1.04, LEGNO, { under: true });
-  box("wood", 1.64, Y0 + 0.97, STAIR.z1, 2.3, Y0 + 1.05, 1.14, LEGNO, { under: true });
-  I.seg(2, -2.6, 2, 0.8, 0.3, 0, 1.25);
-  for (const [cz, bz] of [[-2.5, -2.1], [0.6, 0.25]]) { candelaSu(2, Y0 + 1.05, cz); light(2, Y0 + 1.27, cz, 3.5, 0.4); boccale(1.9, Y0 + 1.05, bz); }
-  brocca(2.05, Y0 + 1.05, -0.9); boccale(1.85, Y0 + 1.05, -1.2);
-  for (const s of [-2.3, -1.5]) sgabello(1.35, Y0, s);
-  botteDaMescita(-2.3); botteDaMescita(-1.45);
-  box("stone", 3.3, Y0, -0.8, IW, Y0 + 0.5, 0.8, PIETRA);                                   // il banco di pietra col fuoco sopra
-  K.panel("stone", "x", IW - 0.01, -0.8, 0.8, Y0 + 0.5, Y0 + 2.15, -1, { tint: FUMO });
-  embers(I.world(3.7, Y0 + 0.48, 0.05), 0.22); fire(I.world(3.7, Y0 + 0.52, 0.05), 0.4, 0.38, 0.12);
-  I.drum("iron", 3.7, 0, 0.17, Y0 + 0.76, Y0 + 1.08, { tint: FERRATO }, 0.26, 8); box("iron", 3.692, Y0 + 1.08, -0.008, 3.708, Y0 + 2.2, 0.008, FERRO);   // il paiolo alla catena
-  for (const s of [-1, 1]) box("stone", 3.72, Y0 + 1.9, s * 0.83 - 0.07, IW, Y0 + 2.15, s * 0.83 + 0.07, PIETRA, { under: true });                          // le mensole
-  box("wood", 2.7, Y0 + 2.15, -0.92, 2.82, Y0 + 2.27, 0.92, TRAVE, { under: true }); for (const s of [-1, 1]) box("wood", 2.82, Y0 + 2.15, s > 0 ? 0.8 : -0.92, IW, Y0 + 2.27, s > 0 ? 0.92 : -0.8, TRAVE, { under: true });
-  hood(2.75, IW, 0.9, 0.5, Y0 + 2.27, DECK, -1);
-  K.slab("stone", Y0 + 2.3, 2.82, -0.8, IW, 0.8, -1, { tint: FUMO });
-  light(3.62, Y0 + 0.85, 0, 5.5, 0.6);
-  I.seg(3.7, -0.4, 3.7, 0.4, 0.4, 0, 3);
-  put(K, "scaffale", IW, Y0, 1.7, -PI / 2);
-
-  // ── i tavoli, il candelabro a ruota ──
-  for (const [x, z] of TABLES) put(K, "tavolo", x, Y0, z);
-  candelaSu(-1, Y0 + 0.76, -2); light(-1, Y0 + 0.98, -2, 3.5, 0.4);
-  for (const s of [-1, 1]) { candelaSu(s * 3.5, Y0 + 0.76, 3.3); light(s * 3.5, Y0 + 0.98, 3.3, 3.5, 0.4); }
-  put(K, "candelabro", -0.5, Y0 + 2.25, 1.2);
-  light(-0.5, Y0 + 2.5, 1.2, 6.5, 0.8);
-
-  // ── primo piano: pavimento stanza per stanza, muri, tramezzi a graticcio, soffitto a travi ──
-  const assi = (x0: number, z0: number, x1: number, z1: number, holes: number[][] = []): void => {
-    K.slab("wood", Y1, x0, z0, x1, z1, 1, { tint: ASSITO }, holes, true); K.slab("wood", CEIL, x0, z0, x1, z1, -1, { tint: SCURO }, holes, true);
-  };
-  const canna = (m: number): number[] => (m < 0 ? [-IW, -0.5, -2.8, 0.5] : [2.8, -0.5, IW, 0.5]);
-  assi(-IW, STAIR.z1, IW, -1.6); assi(-IW, -IW, STAIR.vano, STAIR.z1); assi(STAIR.x1, -IW, IW, STAIR.z1);
-  K.slab("wood", CEIL, STAIR.vano, -IW, STAIR.x1, STAIR.z1, -1, { tint: SCURO }, [], true);
-  ROOMS.forEach(([x0, x1, door], i) => { assi(x0, -1.3, x1, IW, i === 1 ? [] : [canna(i - 1)]); K.slab("wood", Y1, door - 0.6, -1.6, door + 0.6, -1.3, 1, { tint: ASSITO }, [], true); });
-  K.panel("plaster", "z", -IW, -IW, IW, Y1, CEIL, 1, { tint: INTONACO });
-  K.panel("plaster", "z", IW, -IW, IW, Y1, CEIL, -1, { tint: INTONACO }, [[-1.4, Y1, -1.1, CEIL], [1.1, Y1, 1.4, CEIL], ...[-1, 0, 1].map((s) => [s * 2.7 - 0.5, 4.2, s * 2.7 + 0.5, 6.1])]);
-  for (const m of [-1, 1]) {
-    K.panel("plaster", "x", m * IW, -IW, IW, Y1, CEIL, -m as 1 | -1, { tint: INTONACO }, [[-0.5, Y1, 0.5, CEIL], [-1.6, Y1, -1.3, CEIL]]);
-    // la canna fumaria che attraversa la camera
-    K.panel("stone", "x", m * 2.8, -0.5, 0.5, Y1, CEIL, -m as 1 | -1, { tint: MURO });
-    for (const s of [-1, 1] as const) K.panel("stone", "z", s * 0.5, Math.min(m * 2.8, m * IW), Math.max(m * 2.8, m * IW), Y1, CEIL, s, { tint: MURO });
-    I.seg(m * 3.3, 0, m * IW, 0, 0.5, Y1 - 0.1, 6.6);
-  }
-  const vani = ROOMS.map(([, , door]) => [door - 0.6, Y1, door + 0.6, Y1 + DOOR_H]);
-  K.panel("plaster", "z", -1.6, -IW, IW, Y1, CEIL, -1, { tint: INTONACO }, vani);
-  K.panel("plaster", "z", -1.3, -IW, IW, Y1, CEIL, 1, { tint: INTONACO }, [...vani, [-1.4, Y1, -1.1, CEIL], [1.1, Y1, 1.4, CEIL]]);
-  for (const x of [-1.4, 1.1]) {
-    K.panel("plaster", "x", x, -1.3, IW, Y1, CEIL, -1, { tint: INTONACO }); K.panel("plaster", "x", x + 0.3, -1.3, IW, Y1, CEIL, 1, { tint: INTONACO });
-    for (const z of [0.6, 2.4]) box("wood", x - 0.02, Y1, z, x + 0.32, CEIL, z + 0.12, TRAVE);   // i montanti del graticcio
-    I.seg(x + 0.15, -1.3, x + 0.15, IW, 0.15, Y1 - 0.1, 6.6);
-  }
-  const edges = [-IW, ...vani.flatMap((v) => [v[0], v[2]]), IW];
-  for (let i = 0; i < edges.length; i += 2) I.seg(edges[i] + (i ? 0.15 : 0), -1.45, edges[i + 1] - (i < edges.length - 2 ? 0.15 : 0), -1.45, 0.15, Y1 - 0.1, 6.6);   // i pezzi di tramezzo fra una porta e l'altra
-  for (const v of vani) {   // il telaio di ogni porta: due montanti e l'architrave, che fanno anche da spalletta
-    for (const x of [v[0] - 0.1, v[2]]) box("wood", x, Y1, -1.62, x + 0.1, Y1 + DOOR_H, -1.28, TRAVE);
-    box("wood", v[0] - 0.1, Y1 + DOOR_H, -1.62, v[2] + 0.1, Y1 + DOOR_H + 0.12, -1.28, TRAVE, { under: true });
-  }
-  for (const x of [-2.5, -1.25, 0, 1.25, 2.5]) box("wood", x - 0.1, BEAM1, -IW, x + 0.1, CEIL, IW, TRAVE, { open: true, under: true });
-  for (const x of [-1.25, 0.85]) { candelaMuro(x, Y1 + 1.7, -1.6, -1); light(x, Y1 + 1.8, -1.8, 4, 0.45); }
-
-  // ── le camere e il ripostiglio ──
-  for (const [, , , , bed, , stool] of ROOMS) {
-    put(K, "letto", bed, Y1, 3); put(K, "forziere", bed, Y1, 1.65); sgabello(stool, Y1, 3.75); candelaSu(stool, Y1 + 0.42, 3.75); light(stool, Y1 + 0.64, 3.75, 3.5, 0.4);
-  }
-  put(K, "scaffale", -3, Y1, -IW); put(K, "forziere", -3.82, Y1, -3.05, -PI / 2);
-
-  // ── i muri che fermano il passo: perimetro a ogni quota, col vano del portone (i battenti li ferma Doors) ──
-  I.seg(-4.3, -4.3, 4.3, -4.3, 0.2, -0.5, 7);
-  for (const s of [-1, 1]) { I.seg(s * 4.3, -4.3, s * 4.3, 4.3, 0.2, -0.5, 7); I.seg(s * 4.3, 4.3, s * (pw / 2 + 0.2), 4.3, 0.2, -0.5, 7); }
-  I.seg(-pw / 2 - 0.2, 4.3, pw / 2 + 0.2, 4.3, 0.2, 3.2, 7);   // sopra il portone: ferma solo chi sta al primo piano (chi salta sulla soglia batte la testa, vedi il soffitto qui sotto)
-
-  // ── pavimenti: sala e soglia, primo piano in tre rettangoli (il quarto è il vano), rampa, e il piano chiuso di sopra che fa da soffitto ──
-  floor(-IW, -IW, IW, IW, Y0); floor(-pw / 2 - 0.2, IW, pw / 2 + 0.2, 4.95, Y0);
-  floor(-pw / 2 - 0.2, IW, pw / 2 + 0.2, 4.5, Y1, Y1 - 2.62);   // l'architrave del portone: un soffitto basso dentro lo spessore del muro
-  floor(-IW, STAIR.z1, IW, IW, Y1, Y1 - BEAM); floor(-IW, -IW, STAIR.vano, STAIR.z1, Y1, Y1 - BEAM); floor(STAIR.x1, -IW, IW, STAIR.z1, Y1, Y1 - BEAM);
-  floor(-IW, -IW, IW, IW, 6.75, 6.75 - BEAM1);
-  // la rampa passa a metà di ogni gradino: comincia e finisce mezza alzata dentro i due pavimenti (sale verso +X)
-  I.in(STAIR.x0, 0, (STAIR.z0 + STAIR.z1) / 2, PI / 2, () => K.floor(-(STAIR.z1 - STAIR.z0) / 2, 0, (STAIR.z1 - STAIR.z0) / 2, STAIR.x1 - STAIR.x0, (Y0 + Y1) / 2, undefined, Y1 - Y0 - alz));
-
-  // ── le porte: battenti in mesh a parte ──
-  K.doors.push({ y: TOWN.y + Y0, angle: PI / 2, leaves: [K.leaf("inn_portone_a", [0.95, Y0, zl - 0.065], [0, Y0, zl - 0.065], 2.6, 0.06, -1, true), K.leaf("inn_portone_b", [-0.95, Y0, zl - 0.065], [0, Y0, zl - 0.065], 2.6, 0.06, 1, true)] });
-  ROOMS.forEach(([, , door, hinge], i) => K.doors.push({ y: TOWN.y + Y1, angle: PI / 2, leaves: [K.leaf(`inn_porta${i + 1}`, [hinge, Y1, -1.3], [hinge + (hinge > door ? -1.2 : 1.2), Y1, -1.3], DOOR_H, 0.05, hinge > door ? 1 : -1, false)] }));
-
-  // ── il piano degli abitanti: nodi (con quota), percorsi, posti. Coordinate e versi come nella tavola. ──
-  const spot = (name: string, p: number, x: number, z: number, deg: number, node = false): void => K.place(name, x, p < 0 ? 0 : p ? Y1 : Y0, z, deg, node);
-  const P: [string, number, number, number, number][] = [   // nome, piano (−1 = in strada), x, z, verso
-    ["porta.fuori", -1, 0, 5.45, 180], ["porta", 0, 0, 2.6, 180], ["sala", 0, -0.5, 1.2, 180], ["sala.fondo", 0, -2.5, -2.2, 180], ["scala", 0, -2.5, -3.5, 90],
-    ["bancone", 0, 1.25, 0, 90], ["bancone.varco", 0, 2.9, 1.8, 180], ["cucina", 0, 2.85, 0, 90],
-    ["scala.cima", 1, 3.45, -3.5, 0], ["pianerottolo", 1, 3.45, -2.25, 270], ["camera3.porta", 1, 2.1, -2.25, 0], ["corridoio", 1, 0.6, -2.3, 180],
-    ["camera2.porta", 1, -0.4, -2.25, 0], ["camera1.porta", 1, -2.1, -2.25, 0], ["camera1", 1, -2.2, 2.3, 0], ["camera2", 1, -0.45, 2.3, 0], ["camera3", 1, 2.2, 2.3, 0],
-  ];
-  for (const [name, p, x, z, deg] of P) spot(name, p, x, z, deg, true);
-  for (const [a, b] of [["porta.fuori", "porta"], ["porta", "sala"], ["sala", "sala.fondo"], ["sala.fondo", "scala"], ["scala", "scala.cima"], ["sala", "bancone"], ["sala", "bancone.varco"], ["bancone.varco", "cucina"],
-    ["scala.cima", "pianerottolo"], ["pianerottolo", "camera3.porta"], ["camera3.porta", "corridoio"], ["corridoio", "camera2.porta"], ["camera2.porta", "camera1.porta"],
-    ["camera1.porta", "camera1"], ["camera2.porta", "camera2"], ["camera3.porta", "camera3"]]) K.link(a, b);
-  // i posti che non sono nodi: ci si arriva dritti dal nodo più vicino
-  spot("focolare", 0, -2.35, 0, 270); spot("focolare.sgabello1", 0, -2.45, -1.05, 310); spot("focolare.sgabello2", 0, -2.45, 1.05, 230);
-  spot("bancone.sgabello1", 0, 1.35, -2.3, 90); spot("bancone.sgabello2", 0, 1.35, -1.5, 90); spot("bancone.oste", 0, 2.75, -0.9, 270); spot("botti", 0, 2.8, -1.9, 90);
-  TABLES.forEach(([x, z], i) => [-1, 1].forEach((b, j) => [-1, 1].forEach((a, k) => spot(`tavolo${i + 1}.${j * 2 + k + 1}`, 0, x + a * 0.45, z + b * 0.62, b < 0 ? 0 : 180))));
-  spot("ripostiglio", 1, -2.9, -3.2, 180);
-  ROOMS.forEach(([, , , , bed], i) => { spot(`camera${i + 1}.letto`, 1, bed, 3, 180); spot(`camera${i + 1}.forziere`, 1, bed, 1, 0); });
-}
-
 /** L'interno di un edificio: la locanda, o il modello del suo tipo con la pianta del suo seme. */
 export function createInterior(scene: Scene, opt: InteriorOptions): Built {
   LUME = opt.lume;
   const K = new Kit(scene, opt.mason(), opt.id, opt.mason, opt.wood), zones: Box[] = [];
-  K.I.in(TOWN.x, TOWN.y, TOWN.z, 0, () => K.I.in(opt.x, 0, opt.z, opt.yaw, () => {
+  // (le fiamme di dentro sono del gruppo dell'edificio: si accendono e si spengono con chi c'è)
+  group(opt.id, () => K.I.in(TOWN.x, TOWN.y, TOWN.z, 0, () => K.I.in(opt.x, 0, opt.z, opt.yaw, () => {
     K.frame();
-    if (opt.kind === "locanda") { K.I.cell = CELL; locanda(K); zones.push([-4.5, -4.5, 4.5, 4.5, 0, 6.6]); return; }
-    const L = layout(opt.kind, opt.size[0], opt.size[1], mulberry32(opt.seed));
+    const L = layout(opt.kind, opt.size[0], opt.size[1], mulberry32(opt.seed), opt.scale);
+    K.thru = L.openings.some((o) => o.deep !== undefined);
     K.I.cell = L.cell;
     build(K, L);
     for (const r of L.rooms) zones.push([r.x0, r.z0, r.x1, r.z1, r.y, r.y + r.h + (r.rise ?? 0)]);
-  }));
-  return K.finish(zones, { x: TOWN.x + opt.x, z: TOWN.z + opt.z }, Math.max(32, Math.hypot(opt.size[0], opt.size[1]) / 2 + 24));
+  })));
+  return K.finish(zones, { x: TOWN.x + opt.x, z: TOWN.z + opt.z }, Math.max(32, Math.hypot(opt.size[0], opt.size[1]) * opt.scale / 2 + 24));
 }

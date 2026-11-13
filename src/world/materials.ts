@@ -1,5 +1,6 @@
-import { Color3, RawTexture, Scene, Texture } from "@babylonjs/core";
+import { Color3, DirectionalLight, RawTexture, Scene, ShadowGenerator, Texture, Vector3, type AbstractMesh, type Effect } from "@babylonjs/core";
 import { CustomMaterial, PBRCustomMaterial } from "@babylonjs/materials";
+import { CLOUD_FUNCS, CloudField } from "../sky/Clouds";
 import type { TexPair } from "./textures";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +76,37 @@ export function addWind(mat: PBRCustomMaterial, amp: number, flutter: number, re
   };
 }
 
+/**
+ * Stoffa al vento (drappi, bandierine, teli dei banchi): un vertice con l'alfa del colore sotto 1 ondeggia lungo la sua
+ * normale, tanto di più quanto più l'alfa è bassa (peso = 1 − alfa: l'orlo appeso sta fermo, quello libero sbatte).
+ * Le raffiche sono quelle dell'erba.
+ */
+export function addFlutter(mat: PBRCustomMaterial): void {
+  tick(mat.getScene());
+  mat.AddUniform("sqTime", "float", undefined);
+  mat.Vertex_Before_PositionUpdated(`
+    #ifdef VERTEXCOLOR
+    float sqFw = 1.0 - color.a;
+    if (sqFw > 0.0) {
+      float sqFp = dot(position.xz, vec2(0.61, 0.47));
+      float sqFg = 0.55 + 0.45 * sin(sqTime * 0.23 + sqFp * 0.2);
+      positionUpdated += normal * ((sin(sqTime * 2.1 + sqFp * 1.9 + position.y * 2.3) * 0.17 + sin(sqTime * 5.3 + sqFp * 4.1 + position.y * 6.0) * 0.045) * sqFw * sqFg);
+    }
+    #endif
+  `);
+  const attach = mat.AttachAfterBind.bind(mat);
+  mat.AttachAfterBind = (mesh, effect) => { attach(mesh, effect); effect.setFloat("sqTime", time); };
+}
+
+// il muschio sui muri e sui tetti della città: rumore a chiazze, più fitto al piede dei muri e sulle facce che guardano in su
+const MOSS_GLSL = `
+float sqMh(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float sqMn(vec3 x) {
+  vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(sqMh(i), sqMh(i + vec3(1.0, 0.0, 0.0)), f.x), mix(sqMh(i + vec3(0.0, 1.0, 0.0)), sqMh(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(sqMh(i + vec3(0.0, 0.0, 1.0)), sqMh(i + vec3(1.0, 0.0, 1.0)), f.x), mix(sqMh(i + vec3(0.0, 1.0, 1.0)), sqMh(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}`;
+
 // ── Lampioni ─────────────────────────────────────────────────────────────────
 // La luce dei lampioni non è una luce (il PBR ne regge poche e la città ha una ventina di lanterne): è COTTA in una
 // texture vista dall'alto che copre la città. Ogni texel dice quanta luce arriva lì (b, in radice) e da che parte
@@ -94,15 +126,16 @@ function lampTex(scene: Scene): RawTexture {
 }
 
 /** Cuoce la luce delle lanterne (posizioni nel mondo) sul rettangolo [x0, z0, larghezza, profondità], che deve contenerle con `reach` metri di margine. */
-export function bakeLamps(scene: Scene, lamps: { x: number; y: number; z: number }[], rect: [number, number, number, number]): void {
-  const n = LAMP.n, R = LAMP.reach, sum = new Float32Array(n * n * 3), data = new Uint8Array(n * n * 4);
+export function bakeLamps(scene: Scene, lamps: { x: number; y: number; z: number; k?: number; r?: number }[], rect: [number, number, number, number]): void {
+  const n = LAMP.n, sum = new Float32Array(n * n * 3), data = new Uint8Array(n * n * 4);
   for (const l of lamps) {
+    const R = l.r ?? LAMP.reach, K = l.k ?? 1;   // (una finestra accesa o un uscio aperto: più debole e più corta di una lanterna)
     const i0 = Math.max(0, Math.floor((l.x - R - rect[0]) / rect[2] * n)), i1 = Math.min(n - 1, Math.ceil((l.x + R - rect[0]) / rect[2] * n));
     const j0 = Math.max(0, Math.floor((l.z - R - rect[1]) / rect[3] * n)), j1 = Math.min(n - 1, Math.ceil((l.z + R - rect[1]) / rect[3] * n));
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
       const dx = l.x - (rect[0] + (i + 0.5) / n * rect[2]), dz = l.z - (rect[1] + (j + 0.5) / n * rect[3]), d = Math.hypot(dx, dz);
       if (d >= R) continue;
-      const c = (1 - (d / R) ** 2) ** 2, k = (j * n + i) * 3, u = c / Math.max(d, 0.35);   // proprio sotto la lanterna la luce viene dall'alto: nessun verso
+      const c = K * (1 - (d / R) ** 2) ** 2, k = (j * n + i) * 3, u = c / Math.max(d, 0.35);   // proprio sotto la lanterna la luce viene dall'alto: nessun verso
       sum[k] += c; sum[k + 1] += dx * u; sum[k + 2] += dz * u;
     }
   }
@@ -114,12 +147,123 @@ export function bakeLamps(scene: Scene, lamps: { x: number; y: number; z: number
   }
   lampTex(scene).update(data);
   LAMP.rect = rect;
-  LAMP.y = lamps.reduce((a, l) => a + l.y, 0) / Math.max(1, lamps.length);
+  const posts = lamps.filter((l) => l.k === undefined);   // la quota è quella delle lanterne
+  LAMP.y = posts.reduce((a, l) => a + l.y, 0) / Math.max(1, posts.length);
 }
 
 /** Quanto sono accese le lanterne (0..1: lo decide l'ora) e se la loro luce si disegna (impostazioni grafiche). */
 export function setLampGlow(k: number): void { LAMP.glow = k; }
 export function setLampLight(on: boolean): void { LAMP.on = on; }
+
+// ── Ombre di chi si muove ────────────────────────────────────────────────────
+// Il sole ha una mappa d'ombre disegnata una volta, i lampioni e gli interni hanno la luce cotta: nessuna di queste luci
+// può fare l'ombra di chi cammina con una mappa. La fa il conto: chi si muove (chi gioca e gli abitanti più vicini) è una
+// pila di tre sfere, e ogni pixel che prende una di quelle luci guarda se una sfera sta fra sé e la luce (la distanza della
+// sfera dal segmento pixel → luce), col bordo sfumato. Vale per il sole (verso fisso), per la pozza dei lampioni (il verso
+// che la texture cotta già dà) e, dentro, per i due fuochi e la finestra più vicini a chi gioca (`setShadeLights`).
+// I fuochi veri più vicini hanno invece una mappa d'ombre vera (flames.ts).
+// ponytail: dodici sfere (quattro corpi), sagome a pupazzo e non la figura vera; per di più serve una cascata d'ombre
+// vicina che si ridisegna a ogni fotogramma.
+const NS = 12;
+const SHADE = { s: new Float32Array(NS * 4), sun: new Vector3(0, 1, 0), k: 0, l: new Float32Array(12) };
+/** Le sfere di chi fa ombra [x, y, z, raggio, …] (nel mondo), il verso DEL sole e quanto pesa la sua ombra (0 di notte). */
+export function setShade(spheres: number[], toSun: Vector3, k: number): void { SHADE.s.fill(0); SHADE.s.set(spheres.slice(0, NS * 4)); SHADE.sun.copyFrom(toSun); SHADE.k = k; }
+/** Dentro: le luci cotte che fanno ombra, [x, y, z, portata] per due fuochi e una finestra (zeri = nessuna). */
+export function setShadeLights(l: number[]): void { SHADE.l.fill(0); SHADE.l.set(l.slice(0, 12)); }
+/** GLSL: mette in `out` (float già dichiarato) quanta ombra fanno le sfere sul punto P rispetto alla luce in L. */
+const occ = (P: string, L: string, out: string): string => `{ vec3 sqD = ${L} - ${P}; float sqD2 = max(dot(sqD, sqD), 1e-4);
+  ${Array.from({ length: NS }, (_, i) => `if (sqO${i}.w > 0.0) { vec3 c = sqO${i}.xyz - ${P}; if (dot(c, c) > sqO${i}.w * sqO${i}.w * 1.25) { float e = length(c - sqD * clamp(dot(c, sqD) / sqD2, 0.0, 1.0)); ${out} = max(${out}, 1.0 - smoothstep(sqO${i}.w * 0.6, sqO${i}.w * 1.3, e)); } }`).join("\n  ")} }`;
+const shadeUniforms = (m: { AddUniform(name: string, kind: string, param: unknown): unknown }): void => { for (let i = 0; i < NS; i++) m.AddUniform(`sqO${i}`, "vec4", undefined); };
+const bindShade = (effect: Effect): void => { for (let i = 0; i < NS; i++) effect.setFloat4(`sqO${i}`, SHADE.s[i * 4], SHADE.s[i * 4 + 1], SHADE.s[i * 4 + 2], SHADE.s[i * 4 + 3]); };
+
+// ── L'ombra vera di chi si muove sotto il sole ───────────────────────────────
+// La mappa d'ombre del sole è una sola, grande, disegnata una volta: chi cammina non c'è. Per loro c'è una seconda mappa,
+// piccola (2048 su 44 m attorno a chi gioca), ridisegnata a ogni fotogramma con SOLO chi si muove (abitanti vicini, la
+// sagoma di chi gioca, la sua spada e il suo scudo): costa poche mesh. La disegna un generatore d'ombre di Babylon appeso a
+// una seconda luce direzionale che non illumina niente (`includedOnlyMeshes`: nessun materiale la conta); i materiali la
+// leggono a mano in `lampLit` e tolgono la luce diretta. Una luce sola non può avere due mappe: per questo il giro.
+const LIVE = { gen: null as ShadowGenerator | null, light: null as DirectionalLight | null, size: 44, depth: 90 };
+function liveShadow(scene: Scene): ShadowGenerator {
+  if (!LIVE.gen) {
+    const l = new DirectionalLight("ombreVive", new Vector3(0, -1, 0), scene);
+    l.intensity = 0; l.shadowFrustumSize = LIVE.size; l.shadowMinZ = 1; l.shadowMaxZ = LIVE.depth;
+    const g = new ShadowGenerator(2048, l);
+    g.bias = 0; g.getShadowMap()!.renderList = [];
+    LIVE.gen = g; LIVE.light = l;
+  }
+  return LIVE.gen;
+}
+/**
+ * Una volta per fotogramma: chi fa ombra al sole (`casters`, solo chi sta vicino), attorno a quale punto, da che parte
+ * viene la luce. `only` = una mesh qualsiasi che non si disegna: la luce finta illumina solo quella, cioè niente.
+ */
+export function setLiveShadow(scene: Scene, casters: AbstractMesh[], at: Vector3, sunDir: Vector3, only: AbstractMesh): void {
+  const g = liveShadow(scene), l = LIVE.light!;
+  if (!l.includedOnlyMeshes.length) l.includedOnlyMeshes = [only];
+  g.getShadowMap()!.renderList = casters;
+  l.direction.copyFrom(sunDir);
+  l.position.copyFrom(at).addInPlace(sunDir.scale(-LIVE.depth / 2));
+}
+
+// ── Le ombre delle nuvole ────────────────────────────────────────────────────
+// Il cielo disegna un campo di nuvole che scorre col vento (sky/Clouds.ts); lo stesso campo, letto da terra, dice quanto
+// un punto sta sotto una nuvola: da ogni pixel si risale verso il sole fino allo strato e si legge la stessa densità
+// (`cloudShadowAt`). Così la macchia d'ombra che passa sulla piazza è proprio la nuvola che si vede in cielo. Toglie la sola
+// luce diretta (quella d'ambiente resta), e solo di giorno: di notte spegnerebbe la luce dei fuochi sotto ogni nuvola.
+// La prendono tutti i materiali all'aperto: quelli di `lampLit` e, con `cloudLit`, pelo, fogliame, erba, rocce, cortecce.
+const CLOUD = { day: 0, on: true };
+/** Quanto è giorno (0 di notte … 1) e se le ombre delle nuvole si disegnano (impostazioni). */
+export function setCloudShadows(day: number): void { CLOUD.day = day; }
+export function setCloudShadowsOn(on: boolean): void { CLOUD.on = on; }
+const CLOUD_CODE = `
+    if (cloudSun.w > 0.0) {
+      float sqCs = 1.0 - cloudSun.w * cloudShadowAt(vPositionW);
+      finalDiffuse *= sqCs;
+      #ifdef SPECULARTERM
+      finalSpecularScaled *= sqCs;
+      #endif
+    }`;
+/** Dichiara ciò che serve a `CLOUD_CODE`. Le funzioni vanno in coda alle definizioni del materiale, chiunque le scriva e quando. */
+function cloudUniforms(m: PBRCustomMaterial): boolean {
+  const done = m as unknown as { sqClouds?: boolean };
+  if (done.sqClouds) return false;   // (già fatto: un materiale passa di qui una volta sola, o le uniform si dichiarano due volte)
+  done.sqClouds = true;
+  for (const u of ["cloudShape", "cloudWind", "cloudSun"]) m.AddUniform(u, "vec4", undefined);
+  const defs = m.Fragment_Definitions.bind(m);
+  m.CustomParts.Fragment_Definitions = (m.CustomParts.Fragment_Definitions ?? "") + CLOUD_FUNCS;
+  m.Fragment_Definitions = (code: string) => defs(code + CLOUD_FUNCS);
+  return true;
+}
+function bindClouds(m: PBRCustomMaterial, effect: Effect): void {
+  const c = CloudField.of(m.getScene());
+  if (!c) { effect.setFloat4("cloudSun", 0, 1, 0, 0); return; }
+  effect.setVector4("cloudShape", c.shape); effect.setVector4("cloudWind", c.wind);
+  effect.setFloat4("cloudSun", c.sun.x, c.sun.y, c.sun.z, CLOUD.on ? c.sun.w * CLOUD.day * 0.75 : 0);   // (un poco meno della forza piena: col cielo coperto a metà la città restava quasi sempre spenta)
+}
+/** Le ombre delle nuvole su un materiale che non passa da `lampLit`. Va chiamata per ultima (dopo che il materiale ha messo il suo `AttachAfterBind`). */
+export function cloudLit(m: PBRCustomMaterial): void {
+  if (!cloudUniforms(m)) return;   // (ha già `lampLit`, che le comprende)
+  m.Fragment_Before_FinalColorComposition(CLOUD_CODE);
+  const attach = m.AttachAfterBind.bind(m);
+  m.AttachAfterBind = (mesh, effect) => { attach(mesh, effect); bindClouds(m, effect); };
+}
+
+// ── Cel shading ──────────────────────────────────────────────────────────────
+// La luce a gradini: invece di sfumare, la luce diretta di ogni pixel cade su pochi toni netti (con un filo di passaggio fra
+// l'uno e l'altro, o il bordo del gradino sfarfalla). Non cambia le luci né le ombre, solo come si leggono: campiture
+// piatte, da disegno. Vale per tutti i materiali che passano da `lampLit` e per gli interni (lì è la luce cotta a gradini).
+const CEL = { on: 0 };
+export function setCel(on: boolean): void { CEL.on = on ? 1 : 0; }
+// Col cel shading i materiali che hanno una texture DIPINTA (textures.ts, `paintedTex`) la prendono al posto della foto:
+// chi crea un materiale iscrive qui come scambiarle, e `setPainted` le scambia tutte.
+const PAINT: ((on: boolean) => void)[] = [];
+export function onPainted(f: (on: boolean) => void): void { PAINT.push(f); }
+export function setPainted(on: boolean): void { for (const f of PAINT) f(on); }
+/** GLSL: una quantità di luce `l` portata al gradino più vicino, larghi `step`. */
+// ⚠️ Sotto mezzo gradino la luce resta com'è: col primo gradino a zero, tutto ciò che stava in ombra (sotto una nuvola, col
+// sole basso, sul lato in ombra di una persona) usciva NERO pieno, perché lì arriva solo la luce del cielo, che è poca.
+// E il passaggio fra un gradino e l'altro è largo (0,3–0,7): stretto, sul bordo sfumato di un'ombra faceva i denti.
+const bands = (l: string, step: number): string => `max((floor(${l} / ${step.toFixed(3)}) + smoothstep(0.3, 0.7, fract(${l} / ${step.toFixed(3)}))) * ${step.toFixed(3)}, min(${l}, ${(step * 0.5).toFixed(3)}))`;
 
 const v3 = (c: Color3): string => `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
 
@@ -127,14 +271,51 @@ const v3 = (c: Color3): string => `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${
  * Fa prendere al materiale la luce cotta dei lampioni. Con `indoor` (i colori della luce degli interni) anche quella di
  * dentro: una mesh che dichiara `metadata.indoor = [fuoco, finestre, quanto]` (chi cammina in una stanza: npcs.ts) lascia
  * il sole e il cielo di fuori e prende la luce della stanza, come i muri che ha attorno. Senza, di notte un abitante
- * resta scuro in una sala illuminata e di giorno troppo chiaro.
+ * resta scuro in una sala illuminata e di giorno troppo chiaro. `gloss` (i metalli di chi gioca: lama, ferri) = quanto
+ * la luce di dentro ci si RIFLETTE: un lampo verso il fuoco e uno verso la finestra, al posto del cielo di fuori.
  */
-export function lampLit(m: PBRCustomMaterial, indoor?: { warm: Color3; cold: Color3; ambient: Color3 }): void {
+export function lampLit(m: PBRCustomMaterial, indoor?: { warm: Color3; cold: Color3; ambient: Color3 }, gloss = 0): void {
   m.AddUniform("sqLampMap", "sampler2D", lampTex(m.getScene()));
   m.AddUniform("sqLampRect", "vec4", undefined);
   m.AddUniform("sqLamp", "vec4", undefined);   // rgb = colore per forza (zero = spenta), a = quota delle fiamme
-  if (indoor) { m.AddUniform("sqIndoor", "vec3", undefined); m.AddUniform("sqDay", "vec3", undefined); }
+  shadeUniforms(m);
+  m.AddUniform("sqSun", "vec4", undefined);   // xyz = verso il sole, w = quanto pesa la sua ombra (negativo: questa mesh non prende ombre)
+  m.AddUniform("sqL0", "vec4", undefined);
+  m.AddUniform("sqCel", "float", undefined);
+  m.AddUniform("sqLive", "sampler2D", liveShadow(m.getScene()).getShadowMap());
+  m.AddUniform("sqLiveM", "mat4", undefined);
+  m.AddUniform("sqLiveK", "float", undefined);   // 0 = questa mesh non prende l'ombra della mappa piccola (chi la proietta: vedi sotto)
+  if (indoor) { m.AddUniform("sqIndoor", "vec3", undefined); m.AddUniform("sqDay", "vec3", undefined); m.AddUniform("sqInW", "vec3", undefined); m.AddUniform("sqInC", "vec3", undefined); }
+  cloudUniforms(m);
   m.Fragment_Before_FinalColorComposition(`
+    // cel shading: la luce diretta (quanta ne arriva, tolto il colore della superficie) a gradini. Va PRIMA delle ombre
+    // fatte a mano qui sotto (nuvole, chi si muove): quelle sfumano, e una sfumatura messa sui gradini li attraversa uno
+    // alla volta ingigantendo ogni minima differenza fra un triangolo e l'altro (le "zigrinature" nell'ombra di una nuvola).
+    // ⚠️ Nessun salto: un fattore che cambia di colpo a una certa luce fa lo stesso difetto.
+    if (sqCel > 0.5) {
+      float sqAl = max(dot(surfaceAlbedo.rgb, vec3(0.299, 0.587, 0.114)), 0.02), sqLl = dot(finalDiffuse, vec3(0.299, 0.587, 0.114)) / sqAl;
+      finalDiffuse *= ${bands("sqLl", 0.4)} / max(sqLl, 1e-4);
+      #ifdef SPECULARTERM
+      finalSpecularScaled = step(vec3(0.5), finalSpecularScaled) * finalSpecularScaled;   // il riflesso: o c'è o non c'è
+      #endif
+    }
+    ${CLOUD_CODE}
+    if (sqSun.w > 0.0 && sqLiveK > 0.5) {   // l'ombra di chi si muove sotto il sole (la mappa piccola): toglie la luce diretta, quella d'ambiente resta
+      vec4 sqQ = sqLiveM * vec4(vPositionW, 1.0);
+      vec3 sqC = sqQ.xyz / sqQ.w * 0.5 + 0.5;
+      float sqA = 0.0, sqE = min(min(sqC.x, 1.0 - sqC.x), min(sqC.y, 1.0 - sqC.y));
+      if (sqE > 0.0 && sqC.z < 1.0) {
+        for (int i = 0; i < 4; i++) {   // quattro letture attorno: il bordo sfuma di un texel
+          vec2 o = vec2(i == 0 || i == 3 ? -0.8 : 0.8, i < 2 ? -0.8 : 0.8) / 2048.0;
+          sqA += step(texture2D(sqLive, sqC.xy + o).r, sqC.z - 0.0011);
+        }
+        sqA *= 0.25 * smoothstep(0.0, 0.06, sqE);
+      }
+      finalDiffuse *= 1.0 - sqSun.w * sqA;
+      #ifdef SPECULARTERM
+      finalSpecularScaled *= 1.0 - sqSun.w * sqA;
+      #endif
+    }
     if (sqLamp.r > 0.0) {
       vec4 sqL = texture2D(sqLampMap, (vPositionW.xz - sqLampRect.xy) / sqLampRect.zw);
       float sqUp = sqLamp.a - vPositionW.y;
@@ -142,13 +323,30 @@ export function lampLit(m: PBRCustomMaterial, indoor?: { warm: Color3; cold: Col
       vec2 sqH = (sqL.rg * 2.0 - 1.0) * ${LAMP.reach.toFixed(1)} * sqrt(max(0.0, 1.0 - sqL.b));
       float sqN = max(dot(normalW, normalize(vec3(sqH.x, max(sqUp, 0.3), sqH.y))), 0.0);
       // sopra la lanterna c'è il suo cappello di ferro: la luce si spegne salendo
-      finalDiffuse += surfaceAlbedo.rgb * sqLamp.rgb * (sqL.b * sqL.b * (0.25 + 0.75 * sqN) * smoothstep(-2.5, 0.3, sqUp));
+      float sqB = 0.0;
+      if (sqSun.w >= 0.0 && sqL.b > 0.02) ${occ("vPositionW", "(vPositionW + vec3(sqH.x, max(sqUp, 0.3), sqH.y))", "sqB")}
+      finalDiffuse += surfaceAlbedo.rgb * sqLamp.rgb * (sqL.b * sqL.b * (0.25 + 0.75 * sqN) * smoothstep(-2.5, 0.3, sqUp) * (1.0 - 0.8 * sqB));
     }
     ${indoor ? `if (sqIndoor.z > 0.0) {
-      finalDiffuse = mix(finalDiffuse, surfaceAlbedo.rgb * (${v3(indoor.warm)} * sqIndoor.x + ${v3(indoor.cold)} * (sqIndoor.y * sqDay) + ${v3(indoor.ambient)}), sqIndoor.z);
+      // la luce di dentro ha un verso: il lato verso il fuoco (o la finestra) è in luce, l'altro in ombra; un verso nullo vale "da ogni parte"
+      float sqNw = dot(sqInW, sqInW) > 0.01 ? 0.3 + 1.25 * max(dot(normalW, sqInW), 0.0) : 0.9;
+      float sqNc = dot(sqInC, sqInC) > 0.01 ? 0.35 + 1.15 * max(dot(normalW, sqInC), 0.0) : 0.9;
+      if (sqSun.w >= 0.0 && sqL0.w > 0.0 && distance(vPositionW, sqL0.xyz) < sqL0.w) {   // chi sta fra questo e il fuoco gli fa ombra
+        float sqC = 0.0;
+        ${occ("vPositionW", "sqL0.xyz", "sqC")}
+        sqNw *= 1.0 - 0.7 * sqC;
+      }
+      finalDiffuse = mix(finalDiffuse, surfaceAlbedo.rgb * (${v3(indoor.warm)} * (sqIndoor.x * sqNw) + ${v3(indoor.cold)} * (sqIndoor.y * sqNc * sqDay) + ${v3(indoor.ambient)}), sqIndoor.z);
       #ifdef SPECULARTERM
       finalSpecularScaled *= 1.0 - sqIndoor.z;
       #endif
+      ${gloss ? `vec3 sqR = reflect(-viewDirectionW, normalW);
+      float sqGw = dot(sqInW, sqInW) > 0.01 ? pow(max(dot(sqR, sqInW), 0.0), 6.0) * 2.2 + 0.25 : 0.5;
+      float sqGc = dot(sqInC, sqInC) > 0.01 ? pow(max(dot(sqR, sqInC), 0.0), 6.0) * 2.2 + 0.25 : 0.5;
+      finalDiffuse += (${v3(indoor.warm)} * (sqIndoor.x * sqGw) + ${v3(indoor.cold)} * (sqIndoor.y * sqGc * sqDay)) * (${gloss.toFixed(2)} * sqIndoor.z);
+      #ifdef REFLECTION
+      finalRadianceScaled *= 1.0 - 0.85 * sqIndoor.z;
+      #endif` : ""}
     }` : ""}
   `);
   const attach = m.AttachAfterBind.bind(m);
@@ -157,9 +355,19 @@ export function lampLit(m: PBRCustomMaterial, indoor?: { warm: Color3; cold: Col
     if (indoor) {
       const li = mesh?.metadata?.indoor as number[] | undefined;
       effect.setFloat3("sqIndoor", li?.[0] ?? 0, li?.[1] ?? 0, li?.[2] ?? 0);
+      effect.setFloat3("sqInW", li?.[3] ?? 0, li?.[4] ?? 0, li?.[5] ?? 0); effect.setFloat3("sqInC", li?.[6] ?? 0, li?.[7] ?? 0, li?.[8] ?? 0);
       effect.setColor3("sqDay", daylight);
     }
-    const k = LAMP.on ? LAMP.glow : 0;
+    bindShade(effect);
+    effect.setFloat4("sqSun", SHADE.sun.x, SHADE.sun.y, SHADE.sun.z, mesh?.metadata?.noShade ? -1 : SHADE.k);
+    effect.setFloat4("sqL0", SHADE.l[0], SHADE.l[1], SHADE.l[2], SHADE.l[3]);
+    effect.setMatrix("sqLiveM", LIVE.gen!.getTransformMatrix());
+    // chi sta nella mappa piccola non ne prende l'ombra: su un corpo, a 2 cm per texel e senza sfumatura, la sua stessa
+    // ombra usciva a macchie dure (il braccio sul fianco, il mento sul petto). L'ombra vera dei fuochi la prende comunque.
+    effect.setFloat("sqLiveK", mesh?.skeleton ? 0 : 1);
+    effect.setFloat("sqCel", CEL.on);
+    bindClouds(m, effect);
+    const k = (LAMP.on ? LAMP.glow : 0) * (1 + 0.035 * Math.sin(time * 7.3) + 0.025 * Math.sin(time * 17.1 + 1.3));   // (la fiamma delle lanterne trema appena)
     effect.setFloat4("sqLampRect", LAMP.rect[0], LAMP.rect[1], LAMP.rect[2], LAMP.rect[3]);
     effect.setFloat4("sqLamp", LAMP.color.r * k, LAMP.color.g * k, LAMP.color.b * k, LAMP.y);
   };
@@ -206,11 +414,12 @@ float sq_n3(vec3 x) {
     const fx = mesh?.metadata?.fx as CreatureFx | undefined;
     effect.setFloat2("sqFx", fx?.flash ?? 0, fx?.dissolve ?? 0);
   };
+  cloudLit(m);
   return m;
 }
 
 /** Corteccia, legno, pelle: PBR classico con albedo + normal map. */
-export function surfaceMaterial(scene: Scene, name: string, t: TexPair, opts: { tint?: Color3; rough?: number; uv?: [number, number]; /** Profondità del rilievo (parallasse), in unità di uv: 0 = niente. */ relief?: number; indoor?: { warm: Color3; cold: Color3; ambient: Color3 } } = {}): PBRCustomMaterial {
+export function surfaceMaterial(scene: Scene, name: string, t: TexPair, opts: { tint?: Color3; rough?: number; uv?: [number, number]; /** Profondità del rilievo (parallasse), in unità di uv: 0 = niente. */ relief?: number; indoor?: { warm: Color3; cold: Color3; ambient: Color3 }; /** Muschio: `y` = la quota del suolo, `k` = quanto (0..1). */ moss?: { y: number; k: number } } = {}): PBRCustomMaterial {
   const m = new PBRCustomMaterial(name, scene);
   m.albedoTexture = t.albedo;
   m.bumpTexture = t.normal;
@@ -227,6 +436,15 @@ export function surfaceMaterial(scene: Scene, name: string, t: TexPair, opts: { 
     m.useParallax = true; m.useParallaxOcclusion = true; m.parallaxScaleBias = opts.relief;
   }
   if (opts.uv) for (const tx of [t.albedo, t.normal]) { (tx as Texture).uScale = opts.uv[0]; (tx as Texture).vScale = opts.uv[1]; }
+  if (opts.moss) {
+    m.Fragment_Definitions(MOSS_GLSL);
+    m.Fragment_Custom_Albedo(`
+      float sqMy = vPositionW.y - ${opts.moss.y.toFixed(2)};
+      float sqMm = sqMn(vPositionW * 0.9) * 0.6 + sqMn(vPositionW * 3.1) * 0.4;
+      float sqMk = smoothstep(0.56, 0.74, sqMm + (1.0 - smoothstep(0.0, 2.4, sqMy)) * 0.34 + clamp(normalize(vNormalW).y, 0.0, 1.0) * 0.14 - 0.08);
+      surfaceAlbedo = mix(surfaceAlbedo, vec3(0.05, 0.085, 0.03) * (0.65 + 0.7 * sqMn(vPositionW * 9.0)), sqMk * ${opts.moss.k.toFixed(2)});
+    `);
+  }
   lampLit(m, opts.indoor);
   return m;
 }
@@ -249,6 +467,7 @@ export function foliageMaterial(scene: Scene, name: string, t: TexPair, opts: { 
   m.twoSidedLighting = false;
   // ⚠️ niente subSurface.translucency del PBR: senza mappa di spessore sbianca le chiome come neve
   void opts.translucency;
+  cloudLit(m);
   return m;
 }
 
@@ -259,6 +478,7 @@ export function grassMaterial(scene: Scene): PBRCustomMaterial {
   m.metallic = 0;
   m.roughness = 0.7;
   m.backFaceCulling = false;
+  cloudLit(m);
   return m;
 }
 
@@ -361,6 +581,7 @@ export function rockMaterial(scene: Scene, rock: TexPair, moss: TexPair): PBRCus
     #endif
     normalW = normalize(mix(nr, sq_triN(rMossN, P * 0.5, N, tw), wm));
   `);
+  cloudLit(m);
   return m;
 }
 
@@ -378,6 +599,7 @@ export function mossyBarkMaterial(scene: Scene, bark: TexPair, moss: TexPair): P
     surfaceAlbedo = mix(surfaceAlbedo, sq_lin(ma.rgb), wm);
     normalW = normalize(mix(normalW, sq_planarN(sq_nm(texture2D(mMossN, vPositionW.xz * 0.6)), N), wm));
   `);
+  cloudLit(m);
   return m;
 }
 
@@ -405,7 +627,11 @@ export function interiorMaterial(scene: Scene, name: string, t: TexPair, light: 
   m.backFaceCulling = false;
   m.AddUniform("sqDay", "vec3", undefined);
   m.AddUniform("sqTime", "float", undefined);
+  m.AddUniform("sqWarm", "float", undefined);   // quanto sono accesi fuoco e candele di quell'edificio (`mesh.metadata.warm`, 0..1)
   m.AddUniform("sqHeight", "sampler2D", t.normal);
+  shadeUniforms(m);
+  m.AddUniform("sqCel", "float", undefined);
+  for (const i of [0, 1, 2]) m.AddUniform(`sqL${i}`, "vec4", undefined);   // le luci cotte che fanno ombra: due fuochi e una finestra
   m.Vertex_Definitions("varying vec2 vSqLum;");
   m.Vertex_MainEnd(`
     #ifdef UV2
@@ -416,8 +642,19 @@ export function interiorMaterial(scene: Scene, name: string, t: TexPair, light: 
   `);
   m.Fragment_Definitions("varying vec2 vSqLum;");
   m.Fragment_Custom_Diffuse(`
-    float sqFlick = 1.0 + 0.04 * sin(sqTime * 9.3) + 0.03 * sin(sqTime * 23.0 + 1.7);   // il fuoco trema appena
-    vec3 sqLight = ${v3(light.warm)} * (vSqLum.x * sqFlick) + ${v3(light.cold)} * (vSqLum.y * sqDay) + ${v3(light.ambient)};
+    // il fuoco è vivo: la sua luce trema, e il tremito corre sui muri (non tutta la stanza insieme)
+    float sqPh = vPositionW.x * 0.9 + vPositionW.z * 0.7 + vPositionW.y * 0.5;
+    float sqFlick = 1.0 + 0.06 * sin(sqTime * 9.3 + sqPh) + 0.045 * sin(sqTime * 23.0 + 1.7 - sqPh * 1.6) + 0.05 * sin(sqTime * 3.7 + sqPh * 0.4);
+    // l'ombra di chi sta fra questo punto e le luci cotte più vicine (due fuochi, una finestra)
+    float sqSw = 0.0, sqSc = 0.0;
+    if (sqL0.w > 0.0 && distance(vPositionW, sqL0.xyz) < sqL0.w) ${occ("vPositionW", "sqL0.xyz", "sqSw")}
+    if (sqL1.w > 0.0 && distance(vPositionW, sqL1.xyz) < sqL1.w) { float sqS1 = 0.0; ${occ("vPositionW", "sqL1.xyz", "sqS1")} sqSw = max(sqSw, sqS1 * 0.6); }
+    if (sqL2.w > 0.0 && distance(vPositionW, sqL2.xyz) < sqL2.w) ${occ("vPositionW", "sqL2.xyz", "sqSc")}
+    vec3 sqLight = ${v3(light.warm)} * (vSqLum.x * sqFlick * sqWarm * (1.0 - 0.75 * sqSw)) + ${v3(light.cold)} * (vSqLum.y * sqDay * (1.0 - 0.65 * sqSc)) + ${v3(light.ambient)};
+    if (sqCel > 0.5) {   // cel shading: la luce cotta della stanza a gradini (mezzo gradino di fondo, o gli angoli bui diventano neri)
+      float sqLl = dot(sqLight, vec3(0.299, 0.587, 0.114));
+      sqLight *= (${bands("sqLl", 0.14)} + 0.07) / max(sqLl, 1e-4);
+    }
     baseColor.rgb = pow(pow(baseColor.rgb, vec3(2.2)) * sqLight * mix(0.7, 1.12, texture2D(sqHeight, vDiffuseUV).a), vec3(0.4545));
   `);
   const attach = m.AttachAfterBind.bind(m);
@@ -425,6 +662,10 @@ export function interiorMaterial(scene: Scene, name: string, t: TexPair, light: 
     attach(mesh, effect);
     effect.setColor3("sqDay", daylight);
     effect.setFloat("sqTime", time);
+    effect.setFloat("sqWarm", (mesh?.metadata?.warm as number | undefined) ?? 1);
+    bindShade(effect);
+    effect.setFloat("sqCel", CEL.on);
+    for (const i of [0, 1, 2]) effect.setFloat4(`sqL${i}`, SHADE.l[i * 4], SHADE.l[i * 4 + 1], SHADE.l[i * 4 + 2], SHADE.l[i * 4 + 3]);
   };
   return m;
 }

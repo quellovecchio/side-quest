@@ -19,7 +19,7 @@ import { DbError, type Db, type LocationDef } from "../data/db";
 export const WORLD = 320;
 export const HALF = WORLD / 2;
 /** Quanto il terreno prosegue a est della conca (la valle della città). */
-export const EAST = 160;
+export const EAST = 200;
 // ⚠️ Questi valori arrivano dal file con `layWorld`: sono gli stessi oggetti per tutta la partita (si riempiono sul posto)
 // e vanno letti solo DENTRO le funzioni, mai al caricamento di un modulo (lì sono ancora vuoti).
 /** Dove comincia la partita (il luogo `spawn` del file). */
@@ -55,6 +55,9 @@ export const pitDist = (x: number, z: number): number => Math.min(1e9, ...PITS.m
 
 /** Le radure, i sentieri, e le strade che scendono alla città (l'ultimo punto è la porta). */
 let CLEARINGS: Line = [], TRAILS: Line[] = [], ROADS: Line[] = [];
+/** Le zone verdi dentro le mura (`green` nel file: rettangoli lontani dalle vie): lì crescono erba, cespugli e qualche albero. */
+let GREENS: [number, number, number, number][] = [];
+export const greenAt = (x: number, z: number): boolean => GREENS.some(([x0, z0, x1, z1]) => x > x0 && x < x1 && z > z0 && z < z1);
 
 /** Posa il mondo come dice il file. Va chiamata prima di generare terreno, bosco e città. */
 export function layWorld(db: Db): void {
@@ -70,6 +73,7 @@ export function layWorld(db: Db): void {
   CLEARINGS = db.locations.filter((l) => l.kind === "clearing").map((l) => l.at);
   TRAILS = db.roads.filter((d) => d.kind === "trail").map((d) => d.line);
   ROADS = db.roads.filter((d) => d.kind === "road").map((d): Line => [...d.line, [TOWN.x - TOWN.hx, TOWN.z]]);
+  GREENS = town.green.map(([[ax, az], [bx, bz]]) => [TOWN.x + Math.min(ax, bx), TOWN.z + Math.min(az, bz), TOWN.x + Math.max(ax, bx), TOWN.z + Math.max(az, bz)]);
 }
 
 /** Distanza da una spezzata e ascissa lungo di essa (0 all'inizio, 1 alla fine). */
@@ -112,7 +116,28 @@ function edge(x: number, z: number): number {
   return smoothstep(95, 158, e + fbm2(x / 40, z / 40, 3, 93) * 14);
 }
 
-export function terrainHeight(x: number, z: number): number {
+/**
+ * Le modifiche al terreno fatte a mano con l'editor della mappa (`public/data/terreno.bin`, salvato a parte): centimetri in
+ * più o in meno su ogni vertice della griglia da un metro, Int16, una riga per ogni z da −HALF a +HALF, ogni riga da x = −HALF
+ * a HALF + EAST. Senza il file vale zero. Si somma al rilievo generato, quindi lo seguono mesh, rocce, piante e sottosuolo.
+ */
+export const LIFT = { w: WORLD + EAST + 1, h: WORLD + 1, d: new Int16Array((WORLD + EAST + 1) * (WORLD + 1)) };
+/** Legge le modifiche al terreno, se ci sono. Va chiamata prima di generare il mondo. */
+export async function loadLift(): Promise<void> {
+  const r = await fetch(`${import.meta.env.BASE_URL}data/terreno.bin`, { cache: "no-cache" }).catch(() => null);
+  const b = r?.ok ? await r.arrayBuffer() : null;
+  if (b?.byteLength === LIFT.d.byteLength) LIFT.d.set(new Int16Array(b));   // (una misura diversa è la pagina del server, non il file)
+}
+/** Di quanto il terreno è stato alzato a mano in (x, z), in metri (fra i quattro vertici attorno). */
+export function lift(x: number, z: number): number {
+  const fx = Math.min(Math.max(x + HALF, 0), LIFT.w - 1.001), fz = Math.min(Math.max(z + HALF, 0), LIFT.h - 1.001);
+  const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j, d = LIFT.d, k = j * LIFT.w + i;
+  return ((d[k] * (1 - u) + d[k + 1] * u) * (1 - v) + (d[k + LIFT.w] * (1 - u) + d[k + LIFT.w + 1] * u) * v) / 100;
+}
+
+export const terrainHeight = (x: number, z: number): number => baseHeight(x, z) + lift(x, z);
+/** Il rilievo generato, senza le modifiche a mano. */
+export function baseHeight(x: number, z: number): number {
   const broad = fbm2(x / 110, z / 110, 4, 1) * 10;
   let h = broad + fbm2(x / 28, z / 28, 4, 2) * 2.2 + fbm2(x / 7, z / 7, 2, 3) * 0.25;
   const td = townDist(x, z), [wx, wz] = wobble(x, z);
@@ -139,6 +164,7 @@ export function terrainHeight(x: number, z: number): number {
 
 /** Densità del bosco 0..1 (fuori dalla radura, dal sentiero e dalla città, a chiazze con prati). */
 export function forestDensity(x: number, z: number): number {
+  if (greenAt(x, z)) return 0.38;   // un verde di città: rado
   const n = fbm2(x / 55, z / 55, 4, 7) * 0.5 + 0.5;
   let d = smoothstep(0.34, 0.56, n);
   d *= smoothstep(16, 34, spawnDist(x, z));
@@ -188,7 +214,7 @@ export function createTerrain(scene: Scene): Terrain {
     const x = -HALF + (i / (SX - 1)) * W, z = (j / (SZ - 1) - 0.5) * WORLD;
     const k = (j * SX + i) * 4;
     const [wx, wz] = wobble(x, z), n = fbm2(x / 3, z / 3, 2, 95) * 0.8;
-    const dirt = Math.max(...TRAILS.map((t) => 1 - smoothstep(1.2, 3.2, along(t, wx, wz).d + n)), ...ROADS.map((r) => 1 - smoothstep(2.4, 4.6, along(r, wx, wz).d + n)), 1 - smoothstep(1, 6, townDist(x, z) + n * 2));
+    const dirt = Math.max(...TRAILS.map((t) => 1 - smoothstep(1.2, 3.2, along(t, wx, wz).d + n)), ...ROADS.map((r) => 1 - smoothstep(2.4, 4.6, along(r, wx, wz).d + n)), greenAt(x, z) ? 0 : 1 - smoothstep(1, 6, townDist(x, z) + n * 2));
     data[k] = dirt * 255;
     const fd = forestDensity(x, z);
     data[k + 1] = smoothstep(0.25, 0.75, fd + fbm2(x / 9, z / 9, 3, 96) * 0.25) * 255;

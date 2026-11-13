@@ -36,7 +36,7 @@ export interface SpawnDef {
 export interface TimeDef { start: number; dayMinutes: number; wake: { name: string; hour: number }[] }
 
 /** I generatori che il file può richiamare: il codice sta in `world/town.ts` (uno per chiave, lo controlla il compilatore). */
-export const PREFABS = ["casa.povera", "casa.graticcio", "casa.ricca", "cattedrale", "municipio", "fucina", "pozzo", "fontana", "banco", "panchina", "panca.pietra", "lampione", "botte", "cassa", "carretto", "bacheca", "orto", "lapidi"] as const;
+export const PREFABS = ["casa.povera", "casa.graticcio", "casa.ricca", "cattedrale", "municipio", "fucina", "pozzo", "fontana", "banco", "panchina", "panca.pietra", "lampione", "botte", "cassa", "carretto", "bacheca", "orto", "lapidi", "festone", "stendardo", "insegna", "panni"] as const;
 export type PrefabId = typeof PREFABS[number];
 /** Quelli che hanno bisogno di una misura (`size`: larghezza e profondità in metri). */
 const SIZED: PrefabId[] = ["casa.povera", "casa.graticcio", "casa.ricca", "cassa"];
@@ -57,7 +57,13 @@ const FITS: Record<InteriorId, PrefabId | "gate"> = { locanda: "casa.ricca", "ca
  * tipo (senza, la sceglie l'id: due case dello stesso tipo non sono gemelle).
  * ⚠️ L'ordine conta: i numeri a caso (case appena storte, finestre accese) si estraggono in fila. Le cose nuove vanno in fondo.
  */
-export interface ChildDef { id?: string; prefab: PrefabId; at: [number, number]; yaw: number; size?: [number, number]; tint?: "vino" | "ocra" | "muschio"; interior?: InteriorId; seed?: number }
+export interface ChildDef { id?: string; prefab: PrefabId; at: [number, number]; yaw: number; size?: [number, number]; /** Quanto è ingrandito l'edificio, altezze comprese (gli arredi dentro restano a misura d'uomo). */ scale: number; tint?: "vino" | "ocra" | "muschio"; interior?: InteriorId; seed?: number;
+  /** Il seme delle piccole differenze a caso di questo elemento (inclinazioni, merci, numeri delle finestre): ognuno il suo, così aggiungerne o toglierne uno non cambia gli altri. */
+  variant?: number;
+  /** Solo per gli oggetti tesi (`SPANS`): i due capi, [x, quota, z] nelle coordinate dell'insediamento. Il lettore ne ricava `at`, `yaw` e `size`. */
+  from?: [number, number, number]; to?: [number, number, number] }
+/** Gli oggetti tesi fra due punti: non hanno posizione e misura ma due capi (`from`, `to`), e si popolano in base alla lunghezza (town.ts, `span`). */
+export const SPANS: PrefabId[] = ["festone", "panni"];
 /** Un selciato: una striscia dritta lungo x o lungo z, larga `width`. */
 export interface PavingDef { kind: "lastre" | "lastre.diagonali" | "cubetti" | "ciottoli"; width: number; line: [number, number][] }
 /** Un posto con un nome, dove qualcuno si ferma: coordinate locali, `yaw` in gradi. */
@@ -78,19 +84,19 @@ export interface LocationDef {
   /** Solo per gli insediamenti: mezzi lati del rettangolo delle mura e quota del piano. */
   ground?: { rect: [number, number]; level: number };
   /** Selciati, tracciati su cui camminano gli abitanti (i punti sono i nodi; un punto ripetuto in due tracciati è un incrocio), cose posate, posti. */
-  paving: PavingDef[]; walks: [number, number][][]; children: ChildDef[]; spots: Record<string, SpotDef>;
+  paving: PavingDef[]; walks: [number, number][][]; /** Le zone verdi dentro le mura: rettangoli fra due angoli, nel riferimento del luogo. */ green: [number, number][][]; children: ChildDef[]; spots: Record<string, SpotDef>;
   /** Solo per gli insediamenti: la porta della città (a ovest). Con `interior` si entra nella torre sud e si sale al corpo di guardia. */
-  gate?: { id: string; interior?: "porta"; seed?: number };
+  gate?: { id: string; interior?: "porta"; seed?: number; scale: number };
 }
 
 /** Un tracciato nel mondo: `trail` è un sentiero; `road` una strada che scende a un insediamento (`to`) e arriva alla sua porta. */
 export interface RoadDef { id: string; kind: "trail" | "road"; line: [number, number][]; to?: string }
 
 /** Gli aspetti che il file può richiamare (`look`): corporatura e vesti stanno in `CAST` (human.ts), cosa si tiene in mano in npcs.ts. */
-export const LOOKS = ["monello", "bambina", "garzone", "educanda", "contadino", "fabbro", "cittadino", "lavandaia", "ostessa", "cittadina", "mercante", "sindaco", "parroco", "suora", "avventuriero", "mago", "vecchio", "vecchia"] as const;
+export const LOOKS = ["monello", "bambina", "garzone", "educanda", "contadino", "fabbro", "cittadino", "lavandaia", "ostessa", "cittadina", "mercante", "sindaco", "parroco", "suora", "avventuriero", "mago", "vecchio", "vecchia", "lampionaio"] as const;
 export type LookId = typeof LOOKS[number];
 /** Le attività che il file può richiamare (`act`): le pose stanno in `ACTS` (npcs.ts). */
-export const ACTS = ["stand", "pray", "hawk", "hammer", "work", "wash", "sit", "crossed", "ponder", "oversee", "sleep"] as const;
+export const ACTS = ["stand", "pray", "hawk", "hammer", "work", "wash", "sit", "crossed", "ponder", "oversee", "sleep", "light", "lean"] as const;
 export type ActId = typeof ACTS[number];
 
 /**
@@ -250,6 +256,12 @@ class Reader {
     return { [keys[0]]: cases[keys[0]](new Reader((this.v as Record<string, unknown>)[keys[0]], `${this.path}.${keys[0]}`)) } as T;
   }
 
+  /** Un punto [x, quota, z]. */
+  xyz(): [number, number, number] {
+    if (!Array.isArray(this.v) || this.v.length !== 3 || this.v.some((n) => typeof n !== "number")) this.fail("attese tre coordinate [x, quota, z]");
+    return this.v as [number, number, number];
+  }
+
   /** Coordinate [x, z] nel mondo. */
   at(): [number, number] {
     if (!Array.isArray(this.v) || this.v.length !== 2 || this.v.some((n) => typeof n !== "number")) this.fail("attese due coordinate [x, z]");
@@ -277,7 +289,9 @@ export function spotCheck(db: Db): (name: string) => boolean {
   const town = db.locations.find((l) => l.kind === "settlement")!;
   const inside = new Set([...town.children, ...(town.gate ? [town.gate] : [])].filter((c) => c.interior).map((c) => c.id!));
   for (const l of db.locations) if (l.kind === "crypt" || l.kind === "cave") inside.add(l.id);   // i posti di cripte e grotte: <id>.ingresso, <id>.centro, <id>.fondo
-  return (name) => name in town.spots || (name.includes(".") && inside.has(name.slice(0, name.indexOf("."))));
+  // (accanto a ogni lampione la città mette un posto: `lampione.N` nell'ordine del file, e `lampione.porta` per le lanterne della porta)
+  const posts = town.children.filter((c) => c.prefab === "lampione").length;
+  return (name) => name in town.spots || name === "lampione.porta" || (/^lampione\.\d+$/.test(name) && +name.slice(9) < posts) || (name.includes(".") && inside.has(name.slice(0, name.indexOf("."))));
 }
 
 /** Controlla il contenuto del file e i riferimenti fra le tabelle. */
@@ -340,14 +354,15 @@ export function parseDb(raw: unknown): Db {
       name: (x) => x.or(undefined, (s) => s.str()), arrive: (x) => x.or(undefined, (s) => s.str()),
       ground: (x) => x.or<LocationDef["ground"]>(undefined, (g) => g.obj({ rect: (n) => n.at(), level: (n) => n.num() })),
       paving: (x) => x.or([], (v) => v.list((p) => p.obj<PavingDef>({ kind: (k) => k.one("lastre", "lastre.diagonali", "cubetti", "ciottoli"), width: (n) => n.num(0.5), line: (n) => n.line() }))),
-      walks: (x) => x.or([], (v) => v.list((w) => w.line())),
+      walks: (x) => x.or([], (v) => v.list((w) => w.line())), green: (x) => x.or([], (v) => v.list((w) => w.line())),
       children: (x) => x.or([], (v) => v.list((c) => c.obj<ChildDef>({
-        id: (n) => n.or(undefined, (s) => s.str()), prefab: (n) => n.one(...PREFABS), at: (n) => n.at(), yaw: (n) => n.or(0, (a) => a.num(-360, 360.001)),
+        id: (n) => n.or(undefined, (s) => s.str()), prefab: (n) => n.one(...PREFABS), at: (n) => n.or(undefined as unknown as [number, number], (a) => a.at()), yaw: (n) => n.or(0, (a) => a.num(-360, 360.001)),
         size: (n) => n.or(undefined, (s) => s.at()), tint: (n) => n.or(undefined, (s) => s.one("vino", "ocra", "muschio")), interior: (n) => n.or(undefined, (s) => s.one(...INTERIORS)),
-        seed: (n) => n.or(undefined, (s) => s.num(0)),
+        seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)),
+        variant: (n) => n.or(undefined, (s) => s.num(0)), from: (n) => n.or(undefined, (s) => s.xyz()), to: (n) => n.or(undefined, (s) => s.xyz()),
       }))),
       spots: (x) => x.or({}, (v) => v.map((s) => s.obj<SpotDef>({ at: (n) => n.at(), yaw: (n) => n.or(0, (a) => a.num(-360, 360.001)) }))),
-      gate: (x) => x.or<LocationDef["gate"]>(undefined, (g) => g.obj({ id: (n) => n.str(), interior: (n) => n.or(undefined, (s) => s.one("porta")), seed: (n) => n.or(undefined, (s) => s.num(0)) })),
+      gate: (x) => x.or<LocationDef["gate"]>(undefined, (g) => g.obj({ id: (n) => n.str(), interior: (n) => n.or(undefined, (s) => s.one("porta")), seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)) })),
     })),
     roads: (r) => r.list((d) => d.obj<RoadDef>({ id: (x) => x.str(), kind: (x) => x.one("trail", "road"), line: (x) => x.line(), to: (x) => x.or(undefined, (s) => s.str()) })),
   });
@@ -381,6 +396,13 @@ export function parseDb(raw: unknown): Db {
     const seen = new Set<string>(l.gate ? [l.gate.id] : []);
     if (l.gate?.id.includes(".")) throw new DbError(`${at}.gate.id: "${l.gate.id}" non può contenere un punto (i posti dentro si chiamano id.posto)`);
     l.children.forEach((c, j) => {
+      // un oggetto teso ha i due capi e niente altro che lo metta a posto; ne ricaviamo centro, verso e lunghezza
+      if (SPANS.includes(c.prefab)) {
+        if (!c.from || !c.to || c.at || c.size) throw new DbError(`${at}.children[${j}]: un "${c.prefab}" si tende fra due capi: servono from e to [x, quota, z], e niente at né size`);
+        const dx = c.to[0] - c.from[0], dz = c.to[2] - c.from[2], len = Math.hypot(dx, dz);
+        if (len < 0.5 || len > 40) throw new DbError(`${at}.children[${j}]: fra i due capi ci vogliono da 0,5 a 40 m (sono ${len.toFixed(1)})`);
+        c.at = [(c.from[0] + c.to[0]) / 2, (c.from[2] + c.to[2]) / 2]; c.yaw = Math.atan2(-dz, dx) * 180 / Math.PI; c.size = [len, 0];
+      } else if (!c.at || c.from || c.to) throw new DbError(`${at}.children[${j}]: a un "${c.prefab}" serve at [x, z] (from e to sono solo degli oggetti tesi: ${SPANS.join(", ")})`);
       if (SIZED.includes(c.prefab) && !c.size) throw new DbError(`${at}.children[${j}].size: a "${c.prefab}" serve la misura [larghezza, profondità]`);
       if (c.interior && FITS[c.interior] !== c.prefab) throw new DbError(`${at}.children[${j}].interior: l'interno "${c.interior}" sta in ${FITS[c.interior] === "gate" ? "una porta della città (gate)" : `un "${FITS[c.interior]}"`}, non in un "${c.prefab}"`);
       if (c.interior && !c.id) throw new DbError(`${at}.children[${j}].id: a un edificio in cui si entra serve un nome (i posti dentro si chiamano id.posto)`);

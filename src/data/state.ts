@@ -6,7 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** La versione del salvataggio: se la forma dello stato cambia va alzata, e i salvataggi vecchi non si caricano. */
-export const SAVE = 1;
+export const SAVE = 2;
 
 export class State {
   flags = new Set<string>();

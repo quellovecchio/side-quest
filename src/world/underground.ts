@@ -51,12 +51,14 @@ export function createUnderground(scene: Scene): Underground {
   for (const m of Object.values(mats)) m.backFaceCulling = false;
   for (const p of PITS) {
     const s = SKIN[p.kind], O = new Mason(), K = new Kit(scene, new Mason(), p.id, () => new Mason(), null);
+    let chamber: number[] = [0, 0, 0, 0, 0, 0];   // la camera, nel riferimento della discesa: [x0, z0, x1, z1, y0, y1]
     const yaw = Math.atan2(p.dx, p.dz);
     // nel riferimento della trincea: +z è la discesa, x il traverso; le quote sono quelle del mondo
     K.I.in(p.x, 0, p.z, yaw, () => O.in(p.x, 0, p.z, yaw, () => {
       K.frame(); K.I.cell = 0.5;
       const ground = (x: number, z: number): number => { const w = O.world(x, 0, z); return terrainHeight(w.x, w.z); };
       const top = Math.min(...[-1.5, -0.5, 0.5, 1.5].map((x) => ground(x, 0))), yb = top - p.depth, L = p.len, z0 = L + WALL, z1 = z0 + p.room[1], hw = p.room[0] / 2;
+      chamber = [-hw - 0.4, z0 - 0.4, hw + 0.4, z1 + 0.4, yb - 1, yb + H];
       // la camera deve stare sotto il terreno con un po' di terra sopra
       for (let x = -hw - 1; x <= hw + 1; x++) for (let z = L; z <= z1 + 1; z++) {
         if (ground(x, z) < yb + H + 0.4) throw new DbError(`db.json.locations "${p.id}": qui il terreno sopra la camera è troppo basso (serve più profondità, o un altro posto)`);
@@ -123,7 +125,9 @@ export function createUnderground(scene: Scene): Underground {
       out.meshes.push(mesh);
     }
     // (una zona larga quanto il raggio: la camera si vede anche da fuori, guardando giù per la trincea)
-    const b = K.finish([[-60, -60, 60, 60, -200, 200]], { x: p.x, z: p.z }, 55);
+    // ⚠️ ma la LUCE di dentro vale solo nella camera: con la zona larga chi stava in piazza, a 50 m dalla cripta, prendeva
+    // la luce della cripta al posto del sole (abitanti e mani quasi neri davanti alla cattedrale)
+    const b = K.finish([[-60, -60, 60, 60, -200, 200]], { x: p.x, z: p.z }, 55, [chamber as [number, number, number, number, number, number]]);
     out.interiors.push(b.interior); out.floors.push(...b.floors); Object.assign(out.spots, b.spots);
   }
   return out;

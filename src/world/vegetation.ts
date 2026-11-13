@@ -2,7 +2,7 @@ import { Color3, Color4, Matrix, Mesh, Quaternion, Scene, Vector3 } from "@babyl
 import { Geo, Placement, scatter, strip, trs, tube } from "./geo";
 import { addWind, foliageMaterial, grassMaterial, surfaceMaterial } from "./materials";
 import { clamp, fbm2, mulberry32, smoothstep } from "./noise";
-import { EAST, forestDensity, HALF, pathDist, pitDist, SPAWN, terrainHeight, townDist } from "./terrain";
+import { EAST, forestDensity, greenAt, HALF, pathDist, pitDist, SPAWN, terrainHeight, townDist } from "./terrain";
 import { barkTex, fernCardTex, grassCardTex, leafCardTex, spruceCardTex } from "./textures";
 import { by, DARK } from "../style";
 
@@ -310,7 +310,7 @@ export function createVegetation(scene: Scene, clearings: Collider[]): Vegetatio
 
   const colliders: Collider[] = [];
   const blocked = (x: number, z: number, r: number): boolean =>
-    townDist(x, z) < r + 5 || clearings.some((c) => Math.hypot(x - c.x, z - c.z) < c.r + r);
+    (townDist(x, z) < r + 5 && !greenAt(x, z)) || clearings.some((c) => Math.hypot(x - c.x, z - c.z) < c.r + r);
   // il bosco continua a est, attorno alla città: x a caso su tutta la larghezza, lasciando `m` di margine
   const anyX = (m: number): number => -HALF + m / 2 + rnd() * (HALF * 2 + EAST - m);
 
@@ -373,7 +373,7 @@ export function createVegetation(scene: Scene, clearings: Collider[]): Vegetatio
     const x = anyX(8), z = (rnd() - 0.5) * (HALF * 2 - 8);
     const d = forestDensity(x, z);
     const pd = pathDist(x, z);
-    const p = (1 - d * 0.85) * smoothstep(1.4, 3.0, pd) * smoothstep(1.5, 6, townDist(x, z)) * (0.55 + 0.45 * (fbm2(x / 8, z / 8, 2, 801) * 0.5 + 0.5));
+    const p = (1 - d * 0.85) * smoothstep(1.4, 3.0, pd) * (greenAt(x, z) ? 1 : smoothstep(1.5, 6, townDist(x, z))) * (0.55 + 0.45 * (fbm2(x / 8, z / 8, 2, 801) * 0.5 + 0.5));
     // ⚠️ solo qui e in felci e cespugli: gli alberi vengono prima nella fila dei numeri a caso, e non devono spostarsi
     if (rnd() > p || pitDist(x, z) < 0.4) continue;
     const s = 0.7 + rnd() * 0.7 + (1 - d) * 0.3;

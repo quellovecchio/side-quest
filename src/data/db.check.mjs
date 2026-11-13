@@ -41,6 +41,9 @@ broken((d) => { d.locations[town].children[1].interior = "taverna"; }, `location
 broken((d) => { d.locations[town].children[1].id = "casa.uno"; }, "non può contenere un punto");
 broken((d) => { d.locations[town].children.find((c) => c.prefab === "pozzo").seed = 3; }, "il seme sceglie la pianta di un interno");
 broken((d) => { d.locations[town].children[0].interior = "porta"; }, "sta in una porta della città (gate)");
+broken((d) => { d.locations[town].children.find((c) => c.prefab === "festone").at = [0, 0]; }, "si tende fra due capi");
+broken((d) => { d.locations[town].children.find((c) => c.prefab === "panni").to = [90, 3, 0]; }, "fra i due capi ci vogliono da 0,5 a 40 m");
+broken((d) => { d.locations[town].children.find((c) => c.prefab === "pozzo").from = [0, 0, 0]; }, "from e to sono solo degli oggetti tesi");
 broken((d) => { d.locations[town].gate.interior = "locanda"; }, "gate.interior: atteso uno fra porta");
 broken((d) => { d.locations[town].gate.id = "locanda"; }, '"locanda" c\'è già');
 broken((d) => { d.locations[0].gate = { id: "porta2" }; }, "solo un insediamento ha una porta");
@@ -178,10 +181,10 @@ assert.equal(c.label(), "Giorno 2 · 07:00");
 // le piante degli interni (layouts.ts): per ogni edificio del file in cui si entra, quella del suo seme (lo stesso conto di town.ts).
 // Ogni posto dev'essere raggiungibile dalla strada lungo i percorsi, senza passare attraverso muri e arredi.
 // La locanda è fatta a mano e non ha una pianta: la controlla il gioco, in sviluppo, con tutta la rete (checkPlan in town.ts).
-const here = db.locations[town], entered = [...here.children, ...(here.gate ? [here.gate] : [])].filter((c) => c.interior && c.interior !== "locanda");
+const here = db.locations[town], entered = [...here.children, ...(here.gate ? [here.gate] : [])].filter((c) => c.interior);
 let posti = 0;
 for (const c of entered) {
-  const L = layout(c.interior, ...(c.size ?? [0, 0]), mulberry32(seedOf(c)));
+  const L = layout(c.interior, ...(c.size ?? [0, 0]), mulberry32(seedOf(c)), c.scale ?? 1);
   assert.deepEqual(problems(L), [], `${c.id} (${c.interior}): un posto non si raggiunge`);
   assert.ok(L.places.some((p) => p.name === "porta.fuori" && p.node), `${c.id}: serve il nodo porta.fuori, in strada`);
   posti += L.places.length;
@@ -198,7 +201,7 @@ assert.notEqual(twin(seedOf({ id: "casa05" })), twin(seedOf({ id: "casa06" })));
 }
 
 // le tappe degli abitanti dentro gli edifici: il posto deve stare nella pianta di quell'edificio (la locanda è fatta a mano: la controlla il gioco all'avvio)
-const inside = new Map(entered.map((c) => [c.id, new Set(layout(c.interior, ...(c.size ?? [0, 0]), mulberry32(seedOf(c))).places.map((p) => p.name))]));
+const inside = new Map(entered.map((c) => [c.id, new Set(layout(c.interior, ...(c.size ?? [0, 0]), mulberry32(seedOf(c)), c.scale ?? 1).places.map((p) => p.name))]));
 for (const n of db.npcs) for (const t of n.routine) for (const s of t.stops) {
   const i = s.at.indexOf("."), names = inside.get(s.at.slice(0, i));
   assert.ok(i < 0 || !names || names.has(s.at.slice(i + 1)), `${n.id}: il posto "${s.at}" non c'è in quell'edificio`);

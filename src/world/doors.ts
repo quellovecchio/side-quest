@@ -47,7 +47,8 @@ export class Doors {
       });
       const d: Door = { def, cols, base: def.leaves.map((l) => l.pivot.rotation.y), open: 0, want: false, idle: 0, cx, cz };
       solid.push(...cols);
-      interact.list.push({ x: cx, y: def.y + 1.3, z: cz, label: () => (d.want ? "Chiudi" : "Apri"), use: () => { d.want = !d.want; d.idle = 0; } });
+      interact.list.push({ x: cx, y: def.y + 1.3, z: cz, label: () => (d.want ? "Chiudi" : "Apri"), use: () => { d.want = !d.want; d.idle = 0; },
+        outline: () => def.leaves.flatMap((l) => l.pivot.getChildMeshes(true).slice(0, 1)) });   // (il battente: la prima mesh appesa a ogni cardine)
       return d;
     });
   }

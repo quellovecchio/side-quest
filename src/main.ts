@@ -8,16 +8,21 @@ import { Sky } from "./sky/Sky";
 import { dayLight, type DayLight } from "./sky/TimeOfDay";
 import { Clock } from "./clock";
 import { Sleep } from "./sleep";
-import { arrival, createTerrain, layWorld, PITS } from "./world/terrain";
+import { arrival, createTerrain, layWorld, loadLift, PITS } from "./world/terrain";
 import { createUnderground } from "./world/underground";
+import { placeProps } from "./world/props";
+import { loadKit } from "./world/kit";
 import { createFlameLights, createFlames } from "./world/flames";
+import { createFlocks } from "./world/flocks";
 import { photosReady } from "./world/textures";
-import { setInteriorDaylight, setLampGlow, terrainMaterial } from "./world/materials";
+import { setCel, setCloudShadows, setPainted, setInteriorDaylight, setLampGlow, setLiveShadow, setShade, setShadeLights, terrainMaterial } from "./world/materials";
+import { Hulls, flattenMaterials } from "./cel";
 import { dirtTex, forestFloorTex, grassGroundTex, mossTex, rockTex } from "./world/textures";
 import { createRocks, STONES } from "./world/rocks";
 import { createVegetation } from "./world/vegetation";
 import { checkPlan, createTown } from "./world/town";
-import { interiorLight, interiorReach, warmInteriors } from "./world/interiors";
+import { interiorLight, interiorReach, propNear, shadeLights, warmInteriors, type Prop } from "./world/interiors";
+import { Outliner } from "./outline";
 import { Player } from "./player/Player";
 import { createHud } from "./hud";
 import { createGraphicsSettings } from "./settings";
@@ -70,19 +75,19 @@ const LOOK = by({
   fog: 0.0055, fogTint: c3(0.55, 0.62, 0.58), fogMix: 0.3,
   exposure: 1.05, contrast: 1.12, saturation: 0, vignette: 2.2, grain: 5, sharpen: 0.25,
   bloomThreshold: 0.9, bloomWeight: 0.22, rays: 0.6, motes: 45, mist: 0.14, mistWhite: 0.55,
-  moon: c3(0.55, 0.7, 1.0), moonI: 1.0, stars: 1, moonVis: 1, moonVeil: 0.15, lumeDay: 0.4, lamp: c3(1.45, 0.7, 0.2),
+  moon: c3(0.55, 0.7, 1.0), moonI: 1.0, stars: 1, moonVis: 1, moonVeil: 0.15, lumeDay: 0.1, lamp: c3(1.45, 0.7, 0.2),
   // notte serena e blu, luna chiara; alba rosa; tramonto dorato (i colori sono già quelli del cielo: si alzano solo raggi e foschia); ora blu satura
   notte: { amb: c3(0.13, 0.19, 0.36), ambI: 1.0, ground: c3(0.04, 0.05, 0.08), fog: c3(0.2, 0.25, 0.34), dens: 0.006, mist: 0.1, rays: 0, bloom: 0.3, win: c3(0.05, 0.08, 0.16) } as Mood,
   alba: { amb: c3(0.5, 0.42, 0.5), ambI: 1.5, fog: c3(0.5, 0.44, 0.46), dens: 0.008, mist: 0.24, rays: 0, bloom: 0.26, win: c3(0.4, 0.36, 0.45) } as Mood,
   basso: { ambI: 1.15, dens: 0.007, mist: 0.2, rays: 1.0, bloom: 0.3, win: c3(1.0, 0.7, 0.45) } as Mood,
   blu: { amb: c3(0.2, 0.26, 0.5), ambI: 1.0, ground: c3(0.06, 0.07, 0.11), fog: c3(0.3, 0.34, 0.5), dens: 0.006, mist: 0.14, rays: 0, bloom: 0.3, win: c3(0.14, 0.2, 0.4) } as Mood,
 }, {
-  hour: 16.6, skyDim: 0.6, skyGrey: 0.5, clouds: 0.33,
+  hour: 16.6, skyDim: 0.6, skyGrey: 0.5, clouds: 0.5,
   sun: c3(1.0, 0.74, 0.5), sunI: 2.9, hemiI: 1.5, ground: c3(0.17, 0.15, 0.1),
   fog: 0.009, fogTint: c3(0.46, 0.5, 0.46), fogMix: 0.7,
   exposure: 1.2, contrast: 1.16, saturation: -14, vignette: 3, grain: 9, sharpen: 0,
   bloomThreshold: 0.6, bloomWeight: 0.45, rays: 0.45, motes: 20, mist: 0.2, mistWhite: 0.3,
-  moon: c3(0.42, 0.6, 1.0), moonI: 1.9, stars: 0.5, moonVis: 0.85, moonVeil: 0.8, lumeDay: 0.4, lamp: c3(1.35, 0.62, 0.17),
+  moon: c3(0.42, 0.6, 1.0), moonI: 1.9, stars: 0.5, moonVis: 0.85, moonVeil: 0.8, lumeDay: 0.1, lamp: c3(1.35, 0.62, 0.17),
   // notte cupa ma giocabile (la nebbia più chiara delle ombre: tutto si legge in sagoma); alba fredda nella nebbia fitta;
   // tramonto: il sole è già dietro il crinale, la città sta in un'ombra malva (viola dall'alto, calda dal basso) sotto
   // il cielo acceso; ora blu coi lumi pieni
@@ -100,7 +105,10 @@ const ORE: [number, "notte" | "alba" | "basso" | "blu", number][] = [
 ];
 
 async function main(): Promise<void> {
+  // l'editor della mappa (src/editor.ts, docs/editor.md): solo in sviluppo, con `?editor` nell'indirizzo
+  const EDITOR = import.meta.env.DEV && new URLSearchParams(location.search).has("editor");
   // il file dei dati si legge prima del mondo; se è sbagliato ci si ferma qui, dicendo dove
+  await Promise.all([loadKit(), loadLift()]);   // i pezzi fatti con Blender e le modifiche al terreno: servono a chi costruisce il mondo
   const db = await loadDb().then((d) => { layWorld(d); return d; }).catch((e: Error) => {
     document.querySelector("#loading p")!.textContent = e.message;
     throw e;
@@ -138,7 +146,8 @@ async function main(): Promise<void> {
   scene.fogMode = Scene.FOGMODE_EXP2;
   scene.fogDensity = LOOK.fog;
   scene.fogColor = fog;
-  const clouds = new CloudField(scene, day.sunDir, { coverage: LOOK.clouds });
+  // (cumuli da 260 m, non da 600: più piccoli della città, così a terra passano chiazze d'ombra e non mezze giornate di nuvolo)
+  const clouds = new CloudField(scene, day.sunDir, { coverage: LOOK.clouds, size: 260 });
   const sky = new Sky(scene, day, fog);
   // gli umori dell'ora `day` (vedi `ORE`): fra quali due si è, a che punto, quanto pesano sui numeri scalati
   let mood = { a: LOOK.notte, b: LOOK.notte, t: 0, w: 0 };
@@ -206,7 +215,7 @@ async function main(): Promise<void> {
   lap("rocce");
   const veg = createVegetation(scene, rocks.colliders);
   lap("vegetazione");
-  const town = createTown(scene, db.locations.find((l) => l.kind === "settlement")!);
+  const town = createTown(scene, db.locations.find((l) => l.kind === "settlement")!, { editor: EDITOR });
   lap("città");
   // il sottosuolo (cripte e grotte del file): da qui in poi fa parte della città per tutto ciò che la riguarda — mesh che
   // fanno ombra, ostacoli, pavimenti, camere che si accendono da vicino, posti con nome
@@ -214,8 +223,21 @@ async function main(): Promise<void> {
   town.meshes.push(...under.meshes); town.colliders.push(...under.colliders); town.floors.push(...under.floors);
   town.interiors.push(...under.interiors); Object.assign(town.plan.spots, under.spots);
   lap("sottosuolo");
+  // gli arredi da modello che la città ha dichiarato (props.ts): si caricano e si posano qui; fanno ombra come il resto
+  const props = await placeProps(scene, EDITOR);   // (nell'editor una mesh per copia: si spostano con l'elemento che le ha volute)
+  town.meshes.push(...props);
+  // l'arredo di strada (le mesh `…+` della città): fa ombra anche nella mappa piccola attorno a chi gioca. Gli oggetti da
+  // modello no: sono decine di migliaia di triangoli per istanza, e ridisegnarli a ogni fotogramma dimezzava il framerate
+  const furniture = town.meshes.filter((m) => m.name.endsWith("+"));
+  lap("arredi");
   // le fiamme che città, interni e sottosuolo hanno dichiarato costruendosi: fuoco e fumo veri (flames.ts)
   const fire = createFlames(scene);
+  // gli stormi: piccioni di giorno, pipistrelli col buio; partono e si posano sui tetti alti (cattedrale, municipio, porta)
+  const roosts = ([["cattedrale", 31], ["municipio", 24]] as const).flatMap(([prefab, h]): [number, number, number][] => {
+    const c = db.locations.find((l) => l.kind === "settlement")!.children.find((k) => k.prefab === prefab);
+    return c ? [[TOWN.x + c.at[0], TOWN.y + h, TOWN.z + c.at[1]]] : [];
+  });
+  const flocks = createFlocks(scene, [...roosts, [TOWN.x - TOWN.hx, TOWN.y + 25, TOWN.z]], [TOWN.x, TOWN.z], 32);
   let fireT = 0;
   // tutto ciò che ferma il passo del giocatore: massi, tronchi, muri della città e, più sotto, gli abitanti
   const solid = [...rocks.colliders, ...veg.colliders, ...town.colliders];
@@ -248,6 +270,17 @@ async function main(): Promise<void> {
   const player = new Player(scene, levels.ground, solid, probe.cubeTexture, hud, start, start.look ?? STONES);
   player.ceiling = levels.ceiling;
   const interact = new Interact(hud.prompt);
+  // Ciò che si può usare, quando si è abbastanza vicini da usarlo davvero, ha un contorno attorno alla sua sagoma (outline.ts):
+  // sottile su tutto ciò che è a portata, più spesso su quello a cui il tasto E si rivolge.
+  const outliner = new Outliner(scene), shells = new Map<Prop, Mesh>();
+  /** Il contorno di un arredo fuso nella stanza (letto, forziere, candela): quello del genere giusto più vicino al punto. */
+  const propOutline = (x: number, y: number, z: number, kind: RegExp, r: number) => (): Mesh[] => {
+    const pr = propNear(x, y, z, kind, r);
+    if (!pr) return [];
+    if (!shells.has(pr)) shells.set(pr, outliner.shell("arredo_contorno", pr.pos, pr.idx));
+    return [shells.get(pr)!];
+  };
+  const showSigns = (on: boolean, dt: number): void => outliner.show(on ? interact.near.filter((u) => u.outline).map((u) => ({ meshes: u.outline!(), strong: u === interact.current })) : [], dt);
   // parlare: le righe di un abitante, una alla volta; finché il riquadro è aperto il tasto E le fa scorrere
   const dialogue = new Dialogue((on) => player.freeze(on));
   // il pannello a liste: inventario (tasto I), bottega, banco dell'oste
@@ -318,6 +351,7 @@ async function main(): Promise<void> {
     const u = {
       get x() { return n.pos.x; }, get y() { return n.pos.y + 1.4; }, get z() { return n.pos.z; },
       label: () => (n.asleep || busy() ? null : "Parla"), use: () => reactTo(n, "talk"),
+      outline: () => [n.h.mesh],
     };
     interact.list.push(u); npcOf.set(u, n);
   }
@@ -503,11 +537,13 @@ async function main(): Promise<void> {
       x: s.x, y: (s.y ?? terrain.height(s.x, s.z)) + 0.6, z: s.z,
       label: () => (state.opened.has(c.id) || busy() ? null : `Apri ${c.name}`),
       use: () => { state.opened.add(c.id); gain({ ...c.items, ...(c.monete ? { monete: c.monete } : {}) }); },
+      outline: propOutline(s.x, (s.y ?? terrain.height(s.x, s.z)) + 0.4, s.z, /forziere/, 1.8),
     });
   }
   solid.push(...npcs.colliders);
   npcs.indoor = interiorLight;   // chi sta dentro un edificio prende la luce di dentro
-  player.onGust = (x, z, dx, dz, str) => { mist.gust(x, z, dx, dz, str, 3.6); const n = npcs.scare(x, z); if (n) reactTo(n, "hit"); };
+  player.onSweep = (x, z, dx, dz, str) => mist.gust(x, z, dx, dz, str, 1.05);   // la foschia si apre lungo la lama
+  player.onGust = (x, z, dx, dz, str) => { mist.gust(x, z, dx, dz, str * 0.2, 3); const n = npcs.scare(x, z); if (n) reactTo(n, "hit"); };
   mist.covered = levels.covered;
   const movers: Mover[] = [];
 
@@ -627,7 +663,7 @@ async function main(): Promise<void> {
     // pozza di luce sulla strada, piene all'ora blu. Le fiamme (candele, focolari, forgia) sono un altro materiale: sempre accese.
     const fin = Math.min(1, day.glow * 1.6), lam = Math.min(1, Math.max(0, (day.glow - 0.15) / 0.6));
     town.lumi.finestre.emissiveColor = lumeCol.scale(LOOK.lumeDay + (1 - LOOK.lumeDay) * fin);
-    Color3.LerpToRef(lumeCol.scale(LOOK.lumeDay), LOOK.lamp, lam, town.lumi.lanterne.emissiveColor);
+    town.lumi.lanterne.emissiveColor.copyFrom(LOOK.lamp);   // (una lanterna è accesa o spenta: lo dice il colore dei suoi vertici, non l'ora)
     setLampGlow(lam);
     // dentro: dalle finestre entra il giorno, l'arancio del tramonto, il blu della luna
     setInteriorDaylight(col(new Color3(sunUp, sunUp, sunUp), "win"));
@@ -635,23 +671,93 @@ async function main(): Promise<void> {
   setHour(true);
 
   // dormire: ogni posto che finisce per ".letto" è un letto in cui ci si corica (tasto E), scegliendo quando svegliarsi
-  const homeLit = new Map<string, number>();
-  const sleep = new Sleep(clock, db.time.wake, { freeze: (on) => player.freeze(on), woke: () => { player.rest(); setHour(true); npcs.settle(); save(); } });
+  // ── LE LUCI ACCESE E SPENTE ──
+  // I lampioni li accende a uno a uno il lampionaio (chi ha l'aspetto `lampionaio`: fermo a una tappa `light` accanto a
+  // `lampione.N` lo accende la sera e lo spegne la mattina; a `lume.<edificio>` accende o spegne quell'edificio). In ogni
+  // edificio il fuoco arde (e il comignolo fuma) finché dentro c'è qualcuno di sveglio, le candele solo quando fa buio:
+  // la luce cotta della stanza, le fiamme, le finestre e la lanterna dell'uscio seguono quello.
+  const buildings = [...db.locations.find((l) => l.kind === "settlement")!.children.filter((c) => c.id && c.interior).map((c) => c.id!), ...(town.interiors.some((b) => b.id === "porta") ? ["porta"] : [])];
+  const rooms = new Map(town.interiors.map((b) => [b.id, b.meshes])), warm = new Map<string, number>(), byLumier = new Set<string>();
+  const lumier = npcs.list.find((n) => n.def.look === "lampionaio");
+  const lampState = new Map<string, boolean>();
+  const setLamp = (id: string, on: boolean): void => { lampState.set(id, on); town.light(id, on); fire.set(id + "~", on); };
+  const lights = (now = false): void => {
+    const d = lumier?.doing;
+    if (d?.act === "light") {
+      const on = clock.hour >= 12;
+      if (d.at.startsWith("lampione.")) setLamp(d.at, on);
+      else if (d.at.startsWith("lume.")) { if (on) byLumier.add(d.at.slice(5)); else byLumier.delete(d.at.slice(5)); }
+    }
+    const dark = day.glow > 0.03;
+    for (const id of buildings) {
+      const there = npcs.list.some((n) => n.inside === id), burning = there || byLumier.has(id), candles = byLumier.has(id) || (there && dark);
+      // (quante candele ardono davvero: chi gioca può accenderne in una casa vuota, o spegnerle a chi è dentro)
+      fire.set(id, burning); setLamp(id, candles);
+      const f = fire.frac(id + "~"), lit = f < 0 ? (candles ? 1 : 0) : f, to = burning ? 0.55 + 0.45 * lit : 0.9 * Math.sqrt(lit);   // (−1: lì non ci sono candele)
+      const v = warm.get(id) ?? to, next = now ? to : v + Math.max(-0.3, Math.min(0.3, to - v));
+      warm.set(id, next);
+      for (const m of rooms.get(id) ?? []) (m.metadata ??= {}).warm = next;
+    }
+    town.windows((id) => Math.max(0, Math.min(1, ((warm.get(id) ?? 0) - 0.55) / 0.45)));
+  };
+  /** Le luci come devono essere a quest'ora, di colpo (all'avvio, al risveglio, caricando): a notte fatta il lampionaio è già passato. */
+  const syncLights = (): void => {
+    const night = clock.hour >= 18.5 || clock.hour < 6.2;
+    for (const l of town.lamps) if (l.id.startsWith("lampione.")) setLamp(l.id, night);
+    byLumier.clear();
+    if (night) for (const k of Object.keys(town.plan.spots)) if (k.startsWith("lume.")) byLumier.add(k.slice(5));
+    lights(true);
+  };
+  const sleep = new Sleep(clock, db.time.wake, { freeze: (on) => player.freeze(on), woke: () => { player.rest(); setHour(true); npcs.settle(); syncLights(); save(); } });
   // il menu: salva, carica, ricomincia; e all'avvio si riprende da dove si era
   const saved = (): boolean => localStorage.getItem(KEY) !== null, loadBtn = document.getElementById("save-load") as HTMLButtonElement;
-  const resume = (): void => { if (load()) { setHour(true); npcs.settle(); hud.notice("Partita caricata"); } loadBtn.disabled = !saved(); };
+  const resume = (): void => { if (load()) { setHour(true); npcs.settle(); syncLights(); hud.notice("Partita caricata"); } loadBtn.disabled = !saved(); };
   document.getElementById("save-now")!.addEventListener("click", () => { save(); loadBtn.disabled = false; });
   loadBtn.addEventListener("click", resume);
   document.getElementById("save-new")!.addEventListener("click", (e) => { e.stopPropagation(); localStorage.removeItem(KEY); location.reload(); });
-  resume();
+  if (!EDITOR) resume();   // (l'editor non riprende la partita: non si gioca)
+  // le candele di dentro: il tasto E le accende e le spegne, una per una (finché chi abita lì non decide altrimenti)
+  for (const c of fire.candles) if (interiorLight(c.x, c.y - 1, c.z)) interact.list.push({ x: c.x, y: c.y, z: c.z, label: () => (c.lit() ? "Spegni" : "Accendi"), use: () => c.toggle(), outline: propOutline(c.x, c.y, c.z, /candel|lumiera|bugia/, 0.9) });
   for (const [name, s] of Object.entries(town.plan.spots)) {
-    if (name.endsWith(".letto")) interact.list.push({ x: s.x, y: (s.y ?? terrain.height(s.x, s.z)) + 0.6, z: s.z, label: () => (sleep.busy ? null : "Dormi"), use: () => sleep.show() });
+    if (name.endsWith(".letto")) interact.list.push({ x: s.x, y: (s.y ?? terrain.height(s.x, s.z)) + 0.6, z: s.z, label: () => (sleep.busy ? null : "Dormi"), use: () => sleep.show(), outline: propOutline(s.x, (s.y ?? terrain.height(s.x, s.z)) + 0.4, s.z, /letto/, 1.6) });
   }
 
   // la luce vera delle fiamme vicine (flames.ts): le fanno ombra la città e gli abitanti; il vetro delle lanterne lascia vedere la fiammella
-  const fireLights = createFlameLights(scene, [...town.meshes, ...npcs.list.map((n) => n.h.mesh)]);
+  // Chi gioca non ha un corpo che si veda, ma deve fare ombra: una sagoma che sta solo nell'elenco di chi fa ombra al fuoco
+  // (la sua maschera non è quella della camera: nella scena non si disegna, e nemmeno nella profondità dell'occlusione).
+  const body = MeshBuilder.CreateCapsule("ombra", { height: 1.78, radius: 0.27, tessellation: 10, subdivisions: 1 }, scene);
+  body.layerMask = 0x10000000; body.isPickable = false; body.alwaysSelectAsActiveMesh = true;
+  for (const n of npcs.list) n.h.mesh.receiveShadows = true;
+  // il bordo scuro di chi si muove e di ciò che si tiene in mano (cel.ts): tutto ciò che ha uno scheletro, più mani, spada e scudo
+  const hulls = new Hulls(scene);
+  hulls.add([...scene.meshes.filter((m) => m.skeleton && !m.metadata?.shell), ...player.viewmodelMeshes]);
+  const fireLights = createFlameLights(scene, [...town.meshes, ...npcs.list.map((n) => n.h.mesh), body]);
+  // mani, spada e scudo prendono la luce della stanza in cui si è (come gli abitanti: `lampLit`), non il sole di fuori
+  const hands = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (const m of player.viewmodelMeshes) m.metadata = { ...m.metadata, indoor: hands, noShade: true };   // (le proprie mani non stanno nell'ombra della propria sagoma)
+  // chi fa ombra rispetto al sole, ai lampioni e alle luci cotte degli interni (materials.ts, `setShade`): chi gioca e i tre
+  // abitanti svegli più vicini, ognuno una pila di tre sfere (più basse se è seduto)
+  const pile = (out: number[], x: number, y: number, z: number, sit: boolean): void => {
+    for (const [h, r] of sit ? [[0.3, 0.27], [0.7, 0.29], [1.12, 0.2]] : [[0.33, 0.27], [0.95, 0.3], [1.52, 0.2]]) out.push(x, y + h, z, r);
+  };
+  const toSun = new Vector3();
+  let bodyShadows = true;   // (impostazioni: "Ombre di chi si muove")
+  const shade = (): void => {
+    const p = player.position, out: number[] = [];
+    // al sole l'ombra è vera (una mappa piccola, materials.ts): gli abitanti entro 26 m, la sagoma di chi gioca, spada e scudo
+    const light = Math.max(0, Math.min(1, Math.sin((clock.hour - 5.5) / 13 * Math.PI) * 4)), k = bodyShadows ? light : 0;
+    setCloudShadows(light);   // (le ombre delle nuvole: solo di giorno)
+    setLiveShadow(scene, k > 0 ? [body, ...player.viewmodelMeshes, ...furniture, ...npcs.list.filter((n) => Math.hypot(n.pos.x - p.x, n.pos.z - p.z) < 26).map((n) => n.h.mesh)] : [], p, sun.direction, body);
+    if (!bodyShadows) { setShade(out, toSun, 0); return; }
+    pile(out, p.x, p.y, p.z, false);
+    const near = npcs.list.filter((n) => !n.asleep && Math.hypot(n.pos.x - p.x, n.pos.z - p.z) < 16).sort((a, b) => Math.hypot(a.pos.x - p.x, a.pos.z - p.z) - Math.hypot(b.pos.x - p.x, b.pos.z - p.z)).slice(0, 3);
+    for (const n of near) pile(out, n.pos.x, n.pos.y, n.pos.z, n.doing?.act === "sit");
+    // (solo il sole: di notte la luce diretta della luna è poca, e l'ombra toglierebbe quella dei fuochi)
+    setShade(out, toSun.copyFrom(sun.direction).scaleInPlace(-1), 0.85 * k);
+    setShadeLights(shadeLights(p.x, p.y, p.z));
+  };
   town.lumi.lanterne.alpha = 0.45;
-  createGraphicsSettings({ scene, engine, camera: cam, pipeline: pipe, ssao, godrays: vls, shadowMap, mist, flameLights: fireLights }, (g) => { grassDist = g.grass; shadowStep = g.shadowStep; });
+  createGraphicsSettings({ scene, engine, camera: cam, pipeline: pipe, ssao, godrays: vls, shadowMap, mist, flameLights: fireLights }, (g) => { grassDist = g.grass; shadowStep = g.shadowStep; bodyShadows = g.bodyShadows; setCel(g.cel); hulls.set(g.cel); fire.comic(g.cel); setPainted(g.cel); flattenMaterials(scene, g.cel); });
 
   // viaggio rapido dal menu: una voce per ogni luogo del file che ha un nome (il clic poi riprende il gioco, come ogni clic sul menu)
   const travel = document.getElementById("travel")!;
@@ -672,7 +778,7 @@ async function main(): Promise<void> {
   // fuori dei battenti). La scheda video traduce davvero uno shader solo la prima volta che lo disegna: senza questo, ogni
   // materiale mai visto prima (un interno alla prima porta aperta, i teli del mercato girandosi, un lupo) bloccava il gioco
   // anche per mezzo secondo, soprattutto con l'occlusione ambientale, che di ogni mesh disegna anche la geometria.
-  {
+  if (!EDITOR) {   // (l'editor salta il riscaldamento: qualche scatto la prima volta che si guarda qualcosa, nove secondi in meno a ogni salvataggio)
     const leaves = town.meshes.filter((m) => !scene.meshes.includes(m));
     warmInteriors(true);
     for (const m of leaves) scene.addMesh(m);
@@ -698,7 +804,15 @@ async function main(): Promise<void> {
   lap("riscaldamento");
   shadowMap.resetRefreshCounter();   // la shadow map si disegna ora che tutti i materiali sono compilati
   probe.cubeTexture.resetRefreshCounter();   // e il cielo per i riflessi, ora che il suo shader è pronto
+  syncLights();
   hud.ready();
+  let editor: { update(dt: number): void } | null = null;
+  if (EDITOR) {
+    hud.setPaused(false); player.inputOff = true;
+    for (const m of player.viewmodelMeshes) m.setEnabled(false);
+    const { startEditor } = await import("./editor");
+    editor = await startEditor({ scene, cam, town, locationId: db.locations.find((l) => l.kind === "settlement")!.id, ground: terrain.height, shadowMap, pickables: [...town.meshes, terrain.mesh], terrain: terrain.mesh, props });
+  }
   let lightWait = 0;
   engine.runRenderLoop(() => {
     const dt = engine.getDeltaTime() / 1000;
@@ -708,27 +822,33 @@ async function main(): Promise<void> {
       lightWait = 0.25; setHour();
       hud.magicka(state.magicka / nums["magicka.max"]);
       journal();
-      // le finestre di una casa sono accese se qualcuno che ci abita è dentro e sveglio; si accendono e si spengono in mezzo secondo
-      town.windows((id) => {
-        const v = homeLit.get(id) ?? 0, to = npcs.list.some((n) => n.def.home === id && n.atHome) ? 1 : 0, next = v + Math.max(-0.5, Math.min(0.5, to - v));
-        homeLit.set(id, next);
-        return next;
-      });
+      lights();
     }
-    player.update(dt);
+    if (editor) editor.update(dt); else player.update(dt);
+    body.position.set(player.position.x, player.position.y + 0.89, player.position.z);
+    hulls.update();
+    shade();
+    {
+      const li = interiorLight(player.position.x, player.position.y, player.position.z), k = Math.min(1, dt * 6);
+      if (li) { hands[0] = li[0]; hands[1] = li[1]; for (let i = 0; i < 6; i++) hands[3 + i] += (li[2 + i] - hands[3 + i]) * k; }
+      hands[2] += ((li ? 1 : 0) - hands[2]) * Math.min(1, dt * 5);
+    }
     // il fumo è chiaro di giorno e quasi nero di notte
     fireLights.update(dt, fireT + dt, cam.position);
-    fire.update(fireT += dt, 0.22 + 0.78 * Math.max(0, Math.min(1, Math.sin((clock.hour - 5.5) / 13 * Math.PI) * 1.6)));
+    const tone = Math.max(0, Math.min(1, Math.sin((clock.hour - 5.5) / 13 * Math.PI) * 1.6));
+    fire.update(fireT += dt, 0.22 + 0.78 * tone);
+    flocks.update(dt, fireT, clock.hour, tone);
     if (player.locked) state.magicka = Math.min(nums["magicka.max"], state.magicka + nums["magicka.rec"] * dt);
     if (bolt.t < 1) {   // la scintilla del dardo vola dalla mano al bersaglio in un decimo di secondo e mezzo
       bolt.t = Math.min(1, bolt.t + dt / 0.15);
       Vector3.LerpToRef(bolt.from, bolt.to, bolt.t, bolt.mesh.position);
       if (bolt.t >= 1) bolt.mesh.setEnabled(false);
     }
-    enemies.update(dt, player);
+    if (!editor) enemies.update(dt, player);
     npcs.update(dt, player.position);
     doors.update(dt, npcs.list, player.position);
-    if (dialogue.busy || list.busy) hud.prompt(null); else interact.update(cam.position, cam.rotation.y);
+    if (dialogue.busy || list.busy || editor) hud.prompt(null); else interact.update(cam.position, cam.rotation.y);
+    showSigns(!(dialogue.busy || list.busy || editor) && player.locked, dt);
     // gli interni si disegnano solo da vicino (da quanto, lo dice il dettaglio scelto nelle impostazioni)
     const reach = interiorReach();
     for (const i of town.interiors) {
@@ -745,7 +865,7 @@ async function main(): Promise<void> {
   });
   addEventListener("resize", () => engine.resize());
   if (import.meta.env.DEV) {
-    Object.assign(window, { scene, player, enemies, npcs, levels, solid, clock, setHour, sleep, town, state, dialogue, list, interact, pick, earn, choose, retune, save, load: resume, fireLights, marker: () => marker, tuneNow: () => nums, checkPlan: () => checkPlan(town, levels.ground) });   // debug da console
+    Object.assign(window, { scene, player, enemies, npcs, levels, solid, clock, setHour, sleep, town, state, dialogue, list, interact, pick, earn, choose, retune, save, load: resume, fireLights, fire, syncLights, lampState, warm, marker: () => marker, tuneNow: () => nums, checkPlan: () => checkPlan(town, levels.ground) });   // debug da console
     // il controllo della rete degli abitanti (percorsi sgombri, posti raggiungibili): a ogni avvio in sviluppo
     const bad = checkPlan(town, levels.ground);
     if (bad.length) console.warn(`[posti] ${bad.length} problemi nella rete degli abitanti:\n  ${bad.join("\n  ")}`);
@@ -760,6 +880,12 @@ async function main(): Promise<void> {
       where.textContent = `${clock.label()} · x, z: ${xz} · quota ${p.y.toFixed(1)}` + (townDist(p.x, p.z) < 30 ? ` · città: ${(p.x - TOWN.x).toFixed(1)}, ${(p.z - TOWN.z).toFixed(1)}` : "");
     }, 200);
     addEventListener("keydown", (e) => { if (e.code === "F2") void navigator.clipboard.writeText(`[${xz}]`); });
+    // il pulsante dell'editor della mappa, nel menu di pausa
+    if (!EDITOR) {
+      const b = document.getElementById("save")!.appendChild(document.createElement("button"));
+      b.textContent = "Editor della mappa";
+      b.addEventListener("click", (e) => { e.stopPropagation(); location.search = "?editor"; });
+    }
   }
 }
 

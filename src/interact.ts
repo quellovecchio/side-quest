@@ -1,4 +1,4 @@
-import type { Vector3 } from "@babylonjs/core";
+import type { AbstractMesh, Vector3 } from "@babylonjs/core";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERAZIONE — il tasto E. Chi vuole essere usato (una porta, più avanti un abitante, un forziere)
@@ -12,6 +12,8 @@ export interface Usable {
   /** Cosa fa il tasto ora ("Apri", "Chiudi"…), o null se in questo momento non si può usare. */
   label(): string | null;
   use(): void;
+  /** Le mesh che lo disegnano (o i loro gusci): chi è a portata prende un contorno (outline.ts). Senza, niente contorno. */
+  outline?(): AbstractMesh[];
 }
 
 const REACH = 2.3;
@@ -19,6 +21,8 @@ const REACH = 2.3;
 export class Interact {
   readonly list: Usable[] = [];
   private cur: Usable | null = null;
+  /** Tutto ciò che in questo momento è a portata di mano e si può usare (anche se non lo si sta guardando): chi disegna lo evidenzia. */
+  readonly near: Usable[] = [];
 
   constructor(private prompt: (text: string | null) => void) {}
 
@@ -26,11 +30,13 @@ export class Interact {
   update(eye: Vector3, yaw: number): void {
     const fx = Math.sin(yaw), fz = Math.cos(yaw);
     let best: Usable | null = null, score = 0.55;   // sotto questo coseno non lo si sta guardando
+    this.near.length = 0;
     for (const u of this.list) {
       const dx = u.x - eye.x, dz = u.z - eye.z, d = Math.hypot(dx, dz);
-      if (d > REACH || Math.abs(u.y - eye.y) > 1.6) continue;
+      if (d > REACH || Math.abs(u.y - eye.y) > 1.6 || u.label() === null) continue;
+      this.near.push(u);
       const k = d < 0.4 ? 1 : (dx * fx + dz * fz) / d;
-      if (k > score && u.label() !== null) { score = k; best = u; }
+      if (k > score) { score = k; best = u; }
     }
     this.cur = best;
     this.prompt(best ? best.label() : null);
