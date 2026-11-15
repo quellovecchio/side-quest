@@ -1,4 +1,5 @@
 import { Constants, Effect, PostProcess, Texture, type Camera, type DefaultRenderingPipeline, type Engine, type Scene } from "@babylonjs/core";
+import { HEAD } from "./retro";   // (caricandolo registra anche il plugin PS1 dei materiali, prima che ne nasca uno)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STILE A PIXEL — il mondo resta quello (luci, ombre, vetri, foschia: tutto come prima), cambia come
@@ -157,8 +158,9 @@ export function setPixelStyle(scene: Scene, engine: Engine, camera: Camera, pipe
   const o = scene.onBeforeRenderObservable.add(() => {
     if (--wait > 0) return;
     scene.onBeforeRenderObservable.remove(o);
-    camera.detachPostProcess(b);
-    if (ret) camera.attachPostProcess(b, 0);
+    const head = ret ? [...HEAD, b] : [...HEAD];
+    for (const h of [...HEAD, b]) camera.detachPostProcess(h);
+    head.forEach((h, i) => camera.attachPostProcess(h, i));
     for (const t of TAIL) { camera.detachPostProcess(t); camera.attachPostProcess(t); }
     camera.detachPostProcess(p); camera.detachPostProcess(r);
     if (pal) camera.attachPostProcess(p);
