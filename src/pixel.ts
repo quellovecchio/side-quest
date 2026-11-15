@@ -96,7 +96,7 @@ void main(void) {
 
 /** I filtri che devono stare in coda (dopo quelli della pipeline), nell'ordine; per ultimo viene comunque quello dello stile a pixel. */
 export const TAIL: PostProcess[] = [];
-let pix: PostProcess | null = null, blocchi: PostProcess | null = null, retro: PostProcess | null = null, lines: HTMLDivElement | null = null, block = 1, was: { sharpen: boolean; grain: boolean } | null = null, detail = 0;
+let pix: PostProcess | null = null, blocchi: PostProcess | null = null, retro: PostProcess | null = null, lines: HTMLDivElement | null = null, now = 0, was: { sharpen: boolean; grain: boolean } | null = null, detail = 0;
 const modes = new Map<Texture, number>();
 
 /**
@@ -145,8 +145,9 @@ export function setPixelStyle(scene: Scene, engine: Engine, camera: Camera, pipe
     canvas.after(lines);
   }
   if (lines) lines.style.display = ret ? "" : "none";
-  block = ret ? Math.max(1, Math.round(engine.getRenderHeight() / rows)) : 1;
-  const sizes = (p: PostProcess): void => { p.onApplyObservable.add((e) => { e.setFloat2("sqScreen", p.width, p.height); e.setFloat("sqBlock", Math.max(1, Math.round(p.height / rows) || block)); }); };
+  now = rows;
+  // (le righe si leggono a ogni fotogramma da `now`: i filtri nascono una volta sola, magari quando lo stile era spento)
+  const sizes = (p: PostProcess): void => { p.onApplyObservable.add((e) => { e.setFloat2("sqScreen", p.width, p.height); e.setFloat("sqBlock", Math.max(1, Math.round(p.height / Math.max(1, now)))); }); };
   // (in HDR come il disegno del mondo che riceve, o il bloom non trova più le luci sopra 1)
   if (!blocchi) { blocchi = new PostProcess("blocchi", "sqBlocchi", ["sqScreen", "sqBlock"], null, 1, null, Texture.BILINEAR_SAMPLINGMODE, engine, false, null, Constants.TEXTURETYPE_HALF_FLOAT); sizes(blocchi); }
   if (!retro) { retro = new PostProcess("retro", "sqRetro", ["sqScreen", "sqBlock"], null, 1, null, Texture.BILINEAR_SAMPLINGMODE, engine); sizes(retro); }
