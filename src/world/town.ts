@@ -4,11 +4,11 @@ import { Geo } from "./geo";
 import { embers, fire, flame, group, markFlames, smoke } from "./flames";
 import { markProps, prop, propOwner, takeProps, type Want } from "./props";
 import { piece as kitPiece, type PieceId } from "./kit";
-import { addFlutter, bakeLamps, onPainted, surfaceMaterial } from "./materials";
+import { addFlutter, bakeLamps, onPainted, setMossGround, surfaceMaterial } from "./materials";
 import { mulberry32 } from "./noise";
 import { LIP, entry, layout, seedOf } from "./layouts";
-import { TOWN } from "./terrain";
-import { clothTex, masonryTex, paintedTex, photoTex, type Painted } from "./textures";
+import { reliefGrid, TOWN, townGround } from "./terrain";
+import { brickFloorTex, clothTex, masonryTex, paintedTex, photoTex, type Painted } from "./textures";
 import type { DoorDef } from "./doors";
 import { createInterior, doorFronts, furnish, onInteriorShown, openDoors, type Built } from "./interiors";
 import { clearWay, type Floor } from "./levels";
@@ -571,6 +571,45 @@ function glassMat(scene: Scene): Material {
   return m;
 }
 
+/**
+ * L'acqua del fiume: una lastra opaca col fondo scuro, che riflette il cielo dell'ora (il colore della nebbia, più chiaro
+ * verso l'alto: Fresnel, quasi niente di fronte e tutto di sbieco) e il lampo del sole. Le increspature sono tre strati di
+ * rumore che scorrono a velocità e versi diversi: la normale si piega secondo la loro pendenza.
+ * ponytail: niente riflesso delle case né corrente lungo l'alveo (lo scorrere è uguale ovunque); se servono, una sonda
+ * di riflessione e il verso del fiume nei colori dei vertici.
+ */
+function waterMat(scene: Scene): Material {
+  const m = new CustomMaterial("town_acqua", scene), sun = new Vector3(), ZERO = Color3.Black();
+  m.diffuseColor = new Color3(0.02, 0.035, 0.038); m.specularColor = Color3.Black(); m.backFaceCulling = false;
+  m.AddUniform("sqSky", "vec3", undefined); m.AddUniform("sqSunDir", "vec3", undefined); m.AddUniform("sqSunCol", "vec3", undefined); m.AddUniform("sqTime", "float", undefined);
+  m.Fragment_Definitions(NOISE_GLSL + `
+float sqWh(vec2 p, float t) {
+  return sqGn(p * 0.35 + vec2(t * 0.05, t * 0.03)) * 0.6 + sqGn(p * 1.3 - vec2(t * 0.11, -t * 0.07)) * 0.3 + sqGn(p * 4.1 + vec2(t * 0.2, t * 0.15)) * 0.1;
+}`);
+  m.Fragment_Before_FragColor(`
+    vec2 sqP = vPositionW.xz; float sqE = 0.12;
+    vec3 sqN = normalize(vec3(-(sqWh(sqP + vec2(sqE, 0.0), sqTime) - sqWh(sqP - vec2(sqE, 0.0), sqTime)) * 1.6, 1.0,
+                              -(sqWh(sqP + vec2(0.0, sqE), sqTime) - sqWh(sqP - vec2(0.0, sqE), sqTime)) * 1.6));
+    vec3 sqV = normalize(vEyePosition.xyz - vPositionW);
+    float sqF = 0.02 + 0.98 * pow(1.0 - max(dot(sqN, sqV), 0.0), 5.0);
+    vec3 sqR = reflect(-sqV, sqN);
+    // (qui il colore è già lineare: il cielo, che è dato in gamma, va portato in lineare)
+    vec3 sqEnv = pow(sqSky, vec3(2.2)) * mix(0.3, 1.1, smoothstep(-0.1, 0.5, sqR.y));
+    float sqGl = pow(max(dot(sqR, sqSunDir), 0.0), 420.0) * 1.3 + 0.12 * pow(max(dot(sqR, sqSunDir), 0.0), 40.0);
+    color.rgb = mix(color.rgb, sqEnv, sqF) + sqSunCol * sqGl;
+  `);
+  const attach = m.AttachAfterBind.bind(m);
+  m.AttachAfterBind = (mesh, effect) => {
+    attach(mesh, effect);
+    const s = scene.getLightByName("sun") as DirectionalLight | null, up = s ? -s.direction.y : 0;
+    effect.setColor3("sqSky", scene.fogColor);
+    effect.setVector3("sqSunDir", s ? sun.copyFrom(s.direction).scaleInPlace(-1) : sun.set(0, 1, 0));
+    effect.setColor3("sqSunCol", s && up > 0 ? s.diffuse.scale(Math.min(1.4, s.intensity * 0.5)) : ZERO);
+    effect.setFloat("sqTime", performance.now() / 1000);
+  };
+  return m;
+}
+
 /** Il vano che `sash` vuole nel muro (per `Mason.wall`): la luce più il telaio. */
 const hole = (x: number, y: number, w: number, h: number): number[] => [x - w / 2 - SASH, y - SASH, x + w / 2 + SASH, y + h + SASH];
 /**
@@ -665,8 +704,19 @@ function lantern(M: Mason, x: number, y: number, z: number, id: string): void {
   LAMPS.push({ id, p: M.world(x, y + 0.2, z), a, b: M.geos.get("lamp")!.c.length / 4 });
 }
 
+/**
+ * Di quanto alzare (o abbassare) ciò che si posa in (x, z) del riferimento corrente perché stia sul suolo della città
+ * (`townGround`: il rilievo, o il piano di sempre; sul piano vale zero).
+ */
+function rise(M: Mason, x: number, z: number): number { const p = M.world(x, 0, z); return townGround(p.x, p.z) - p.y; }
+/** Lo zoccolo: se sotto l'ingombro (centrato nell'origine) il suolo scende, un basamento di pietra fino a terra. */
+function footing(M: Mason, w: number, d: number): void {
+  const drop = Math.max(...[[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sz]) => -rise(M, sx * w / 2, sz * d / 2)));
+  if (drop > 0.05) M.box("stone", -w / 2 - 0.08, -drop - 0.3, -d / 2 - 0.08, w / 2 + 0.08, 0.02, d / 2 + 0.08, { tint: DARK });
+}
+
 function lamppost(M: Mason, x: number, z: number, id: string): void {
-  M.in(x, 0, z, 0, () => {
+  M.in(x, rise(M, x, z), z, 0, () => {
     // base di pietra a due gradini, fusto di ferro a otto facce con due nodi, la traversa con i riccioli
     M.box("stone", -0.24, 0, -0.24, 0.24, 0.14, 0.24, { tint: DARK }); M.box("stone", -0.17, 0.14, -0.17, 0.17, 0.36, 0.17, { tint: DARK });
     M.piece("fusto", 0, 0.36, 0);   // il fusto tornito, coi nodi e il braccio a riccioli (kit)
@@ -733,7 +783,8 @@ function house(M: Mason, rnd: () => number, x: number, z: number, yaw: number, w
   const e = open ? entry((["casa.povera", "casa.graticcio", "casa.ricca"] as const)[kind], w) : null;   // il vano dell'uscio
   // ⚠️ i due numeri a caso si estraggono comunque, in quest'ordine: il resto della città ne dipende
   const a = yaw + (rnd() - 0.5) * 0.05, lean = (rnd() - 0.5) * 0.035;
-  M.in(x, 0, z, a, () => {
+  M.in(x, rise(M, x, z), z, a, () => {
+    footing(M, w, d);
     if (!e) M.solid(-hw, -hd, hw, hd);
     if (kind === 0) {
       const rise = Math.min(d * 0.6, 4.4);   // (le case larghe non hanno un tetto alto il doppio: la falda si fa più dolce; lo stesso conto in layouts.ts)
@@ -868,7 +919,8 @@ const variantOf = (c: ChildDef): number => c.variant ?? [...`${c.prefab}${c.at[0
  * capi possono stare a quote diverse.
  */
 function span(M: Mason, c: ChildDef): void {
-  const [ax, ay, az] = c.from!, [bx, by, bz] = c.to!, len = Math.hypot(bx - ax, bz - az), sag = Math.min(0.9, 0.05 * len + 0.08);
+  // (le quote dei capi sono dal suolo sotto ciascun capo)
+  const [ax, ay0, az] = c.from!, [bx, by0, bz] = c.to!, ay = ay0 + rise(M, ax, az), by = by0 + rise(M, bx, bz), len = Math.hypot(bx - ax, bz - az), sag = Math.min(0.9, 0.05 * len + 0.08);
   const yAt = (t: number): number => ay + (by - ay) * t - sag * (1 - (2 * t - 1) ** 2), cord = (x0: number, x1: number, t0: number, t1: number): void => {
     const y0 = yAt(t0), y1 = yAt(t1), my = (y0 + y1) / 2;
     M.box("timber", x0 - 0.01, my - 0.012, -0.012, x1 + 0.01, my + 0.012, 0.012, { rot: [0, 0, Math.atan2(y1 - y0, x1 - x0)], under: true });
@@ -896,7 +948,169 @@ function span(M: Mason, c: ChildDef): void {
   });
 }
 
+/** I piani calpestabili all'aperto (i ponti), nel mondo: li raccoglie `createTown`. */
+const OPEN: Floor[] = [];
+/**
+ * Un ponte lungo una spezzata (`line` nel file: due punti o più, [x, quota, z] nel riferimento della città, la quota dal suolo
+ * sotto il punto, come i capi dei festoni). L'impalcato va dalla quota del primo capo a quella dell'ultimo, salendo in
+ * proporzione alla strada fatta (un punto di mezzo con una sua quota la impone: sopra l'acqua di solito non serve); a ogni
+ * punto di mezzo una svolta, col suo raccordo tondo e una pila sotto. Fiancate col parapetto, pile fino all'alveo ogni 14 m, un arco fra un appoggio e l'altro,
+ * e il piano su cui si cammina (`OPEN`). `ponte.botteghe` è più largo e ha le botteghe a sbalzo ai due lati: si cammina nel
+ * mezzo. ponytail: i parapetti fermano a ogni quota (chi passa sotto un ponte alto ci sbatte).
+ */
+function bridge(M: Mason, c: ChildDef): void {
+  const pts = c.line!.map(([x, , z]): [number, number] => [x, z]), shops = c.prefab === "ponte.botteghe", W = shops ? 10 : 5.4, hw = W / 2, lane = shops ? 2.6 : hw - 0.3;
+  const S = [0];
+  for (let i = 1; i < pts.length; i++) S.push(S[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  // le quote imposte: i capi sempre, i punti di mezzo solo se ne hanno una; fra l'una e l'altra in proporzione alla strada
+  const fix = c.line!.map(([x, q, z], i) => (i === 0 || i === pts.length - 1 || q ? { s: S[i], y: rise(M, x, z) + q } : null)).filter((f): f is { s: number; y: number } => !!f);
+  const deck = (s: number): number => {
+    const k = Math.max(1, fix.findIndex((f) => f.s >= s)), a = fix[k - 1], b = fix[k];
+    return a.y + (b.y - a.y) * (s - a.s) / Math.max(b.s - a.s, 1e-6);
+  };
+  for (let j = 1; j < pts.length - 1; j++) {   // le svolte: un raccordo tondo all'altezza dell'impalcato, e la pila sotto
+    const [x, z] = pts[j], top = deck(S[j]), g = rise(M, x, z);
+    M.drum("flag", x, z, hw, top - 0.05, top, {}, hw, 20);
+    M.drum("stone", x, z, hw, top - 1.3, top - 0.05, { tint: DARK }, hw, 20);
+    M.drum("stone", x, z, Math.min(hw, 2.2), g - 1, top - 1.3, { tint: DARK }, Math.min(hw, 2.2), 16);
+    const P = M.world(x, top, z);
+    OPEN.push({ x: P.x, z: P.z, hx: hw * 0.75, hz: hw * 0.75, yaw: 0, y: P.y, thick: 1.3, open: true });
+  }
+  for (let j = 0; j < pts.length - 1; j++) {
+    const [ax, az] = pts[j], [bx, bz] = pts[j + 1], L = S[j + 1] - S[j], y = (x: number): number => deck(S[j] + x);
+    const first = j === 0, last = j === pts.length - 2;
+    M.in(ax, 0, az, Math.atan2(-(bz - az), bx - ax), () => {   // lungo la x locale, da 0 a L
+      const n = Math.max(1, Math.ceil(L / 2));
+      for (let i = 0; i < n; i++) {
+        const x0 = i * L / n, x1 = (i + 1) * L / n, a = y(x0), b = y(x1);
+        M.poly("flag", [[x0, a, -hw], [x1, b, -hw], [x1, b, hw], [x0, a, hw]], [0, 1, 0]);                     // il piano
+        M.poly("stone", [[x0, a - 1.3, -hw], [x1, b - 1.3, -hw], [x1, b - 1.3, hw], [x0, a - 1.3, hw]], [0, -1, 0]);
+        for (const s of [-1, 1]) {
+          M.poly("stone", [[x0, a - 1.3, s * hw], [x1, b - 1.3, s * hw], [x1, b + 1.05, s * hw], [x0, a + 1.05, s * hw]], [0, 0, s]);   // la fiancata col parapetto
+          M.poly("stone", [[x0, a + 1.05, s * (hw - 0.4)], [x1, b + 1.05, s * (hw - 0.4)], [x1, b + 1.05, s * hw], [x0, a + 1.05, s * hw]], [0, 1, 0]);
+          M.poly("stone", [[x0, a, s * (hw - 0.4)], [x1, b, s * (hw - 0.4)], [x1, b + 1.05, s * (hw - 0.4)], [x0, a + 1.05, s * (hw - 0.4)]], [0, 0, -s]);
+        }
+      }
+      // le pile, dal fondo fin sotto l'impalcato, e fra un appoggio e l'altro (le sponde, le svolte, le pile) un arco: le fette
+      // di pietra fra la curva dell'intradosso e il piano. L'arco è alto quanto un terzo della luce, ma non scende sotto il fondo.
+      const props = [0];
+      for (let x = 14; x < L - 6; x += 14) {
+        const g = rise(M, x, 0);
+        if (g < y(x) - 3) { M.box("stone", x - 1.4, g - 1, -hw - 0.3, x + 1.4, y(x) - 1.3, hw + 0.3, { tint: DARK }); props.push(x); }
+      }
+      props.push(L);
+      for (let k = 0; k < props.length - 1; k++) {
+        const s0 = props[k] + (k || !first ? 1.4 : 0), s1 = props[k + 1] - (k < props.length - 2 || !last ? 1.4 : 0), span = s1 - s0, n = Math.max(4, Math.ceil(span / 0.6));
+        if (span < 1) continue;
+        for (let i = 0; i < n; i++) {
+          const x0 = s0 + span * i / n, x1 = s0 + span * (i + 1) / n, xm = (x0 + x1) / 2, u = (xm - s0) / span, top = y(xm) - 1.3;
+          const spring = Math.max(rise(M, xm, 0), top - Math.min(7, span * 0.42) - 0.5), arch = spring + (top - 0.5 - spring) * Math.sqrt(Math.max(0, 1 - (2 * u - 1) ** 2));
+          if (arch < top - 0.05) M.box("stone", x0, arch, -hw, x1 + 0.01, top, hw, { tint: DARK, under: true });
+        }
+      }
+      if (shops) {   // le botteghe ai due lati, a sbalzo oltre le fiancate: muro di intonaco, travi, una falda, il banco verso la via
+        for (let x = 4; x + 5.6 < L - 4; x += 6.2) for (const s of [-1, 1]) {
+          const a = y(x), b = y(x + 5.6), top = Math.max(a, b);
+          M.in(x + 2.8, top, s * (hw - 0.6), s > 0 ? PI : 0, () => {   // (la facciata, +Z, guarda la via nel mezzo)
+            M.box("timber", -2.8, -(top - Math.min(a, b)) - 1.6, -2.4, 2.8, 0, 1.4, { tint: DARK });                    // il ballatoio a sbalzo
+            M.box("plaster", -2.7, 0, -2.3, 2.7, 3.4, -0.2);
+            for (const e of [-2.7, 2.7]) M.box("timber", e - 0.12, 0, -0.3, e + 0.12, 3.4, 0.1);
+            M.box("dark", -2.1, 0.9, -0.21, 2.1, 2.6, -0.19);                                                             // la bottega aperta
+            M.box("wood", -2.2, 0.85, -0.2, 2.2, 0.95, 0.35);                                                             // il banco
+            M.in(0, 3.4, -1.2, 0, () => M.hip("tile", 3.05, 1.55, 0, 1.3));
+            M.solid(-2.7, -2.4, 2.7, -0.2);
+          });
+        }
+      }
+      // (i parapetti non arrivano ai capi del ponte: lì passa la via lungo la sponda)
+      for (const s of [-1, 1]) M.line(first ? 1.5 : 0, s * (lane + 0.2), last ? L - 1.5 : L, s * (lane + 0.2), 0.2);
+    });
+    const P = M.world((ax + bx) / 2, (y(0) + y(L)) / 2, (az + bz) / 2);
+    OPEN.push({ x: P.x, z: P.z, hx: shops ? hw : lane, hz: L / 2 + 0.4, yaw: Math.atan2(bx - ax, bz - az), y: P.y, rise: y(L) - y(0), thick: 1.3, open: true });
+  }
+}
+
+/**
+ * Una scalinata lungo una spezzata (`line` nel file: [x, quota, z], la quota dal suolo sotto il punto, come i capi dei
+ * festoni; larga `size[0]`): una rampa di gradini fra un punto e l'altro e un pianerottolo a ogni punto di mezzo, quindi
+ * anche le svolte strette (tornanti). `scala` non ha parapetti (fra le case: la
+ * chiudono i muri, e un parapetto chiuderebbe gli usci); `scala.parapetto` li ha sui due lati di ogni rampa, di mattoni con
+ * la copertina di pietra e un pilastro a ogni capo. I gradini
+ * la dividono in alzate di 16 cm al più. Si cammina sulle rampe e sui pianerottoli (`OPEN`), non sul profilo dei gradini.
+ */
+function stairs(M: Mason, c: ChildDef): void {
+  const pts = c.line!.map(([x, , z]): [number, number] => [x, z]), W = c.size?.[0] ?? 4.4, hw = W / 2, CAP = 1.0;
+  const Y = c.line!.map(([x, q, z]) => rise(M, x, z) + q);   // (la quota di ogni punto: dal suolo, più la sua)
+  const ground = (lx: number, lz: number, y: number, rise: number, hx: number, hz: number, yaw: number): void => {
+    const P = M.world(lx, y, lz);
+    OPEN.push({ x: P.x, z: P.z, hx, hz, yaw, y: P.y, rise, open: true });
+  };
+  for (let i = 1; i < pts.length - 1; i++) {   // i pianerottoli
+    M.in(pts[i][0], Y[i], pts[i][1], 0, () => {
+      M.box("brick", -hw, -0.8, -hw, hw, 0.02, hw);
+      M.box("stone", -hw - 0.05, -0.06, -hw - 0.05, hw + 0.05, 0.03, hw + 0.05, { tint: DARK, under: true });
+    });
+    ground(pts[i][0], pts[i][1], Y[i], 0, hw, hw, 0);
+  }
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1], ya = Y[i], yb = Y[i + 1], L0 = Math.hypot(bx - ax, bz - az);
+    const t0 = i ? hw : 0, t1 = i < pts.length - 2 ? hw : 0, L = L0 - t0 - t1;   // (la rampa va dal bordo di un pianerottolo all'altro)
+    if (L < 0.4) continue;
+    const dh = yb - ya, n = Math.max(1, Math.round(Math.abs(dh) / 0.16)), tread = L / n, bot = Math.min(ya, yb) - 0.6;
+    const yaw = Math.atan2(-(bz - az), bx - ax), up = (x: number): number => ya + dh * (x - t0) / L;
+    M.in(ax, 0, az, yaw, () => {   // lungo la x locale
+      for (let k = 0; k < n; k++) {
+        const x0 = t0 + k * tread, x1 = x0 + tread, top = ya + dh * (k + (dh > 0 ? 1 : 0)) / n;
+        M.box("brick", x0, bot, -hw, x1 + 0.01, top, hw);
+        const nose = dh > 0 ? x0 : x1 - 0.1;   // la pedata finisce con una lastra di pietra sul bordo dell'alzata
+        M.box("stone", nose - 0.02, top - 0.07, -hw, nose + 0.1, top + 0.01, hw, { tint: DARK, under: true });
+      }
+      // i parapetti (solo `scala.parapetto`): ai due capi della scala cominciano due metri più in là, perché lì di solito si
+      // incrocia un'altra via e chi ci arriva di sbieco non deve trovarli davanti
+      const open0 = i === 0 && L > 5 ? 2 : 0, open1 = i === pts.length - 2 && L > 5 ? 2 : 0;
+      const A = t0 + open0, B = t0 + L - open1;
+      if (c.prefab === "scala.parapetto" && B - A > 0.6) for (const s of [-1, 1]) {
+        const zi = s * hw, zo = s * (hw + 0.36);
+        const wall = (a: number, b: number): void => {
+          M.poly("brick", [[a, bot, zo], [b, bot, zo], [b, up(b) + CAP, zo], [a, up(a) + CAP, zo]], [0, 0, s]);
+          M.poly("brick", [[a, up(a), zi], [b, up(b), zi], [b, up(b) + CAP, zi], [a, up(a) + CAP, zi]], [0, 0, -s]);
+          M.poly("stone", [[a, up(a) + CAP, zi - s * 0.04], [b, up(b) + CAP, zi - s * 0.04], [b, up(b) + CAP + 0.08, zo + s * 0.04], [a, up(a) + CAP + 0.08, zo + s * 0.04]], [0, 1, 0]);
+          for (const x of [a, b]) {
+            M.box("brick", x - 0.3, bot, Math.min(zi, zo) - 0.06, x + 0.3, up(x) + CAP + 0.35, Math.max(zi, zo) + 0.06);
+            M.box("stone", x - 0.36, up(x) + CAP + 0.35, Math.min(zi, zo) - 0.12, x + 0.36, up(x) + CAP + 0.47, Math.max(zi, zo) + 0.12, { tint: DARK, under: true });
+          }
+          M.line(a + 0.3, (zi + zo) / 2, b - 0.3, (zi + zo) / 2, 0.2);
+        };
+        wall(A, B);
+      }
+    });
+    const mid = t0 + L / 2;
+    const P = M.world(ax + (bx - ax) * mid / L0, 0, az + (bz - az) * mid / L0);
+    OPEN.push({ x: P.x, z: P.z, hx: hw, hz: L / 2 + 0.05, yaw: Math.atan2(bx - ax, bz - az), y: P.y + (ya + yb) / 2, rise: dh, open: true });
+  }
+}
+
+/** Il teatro coperto, all'italiana: la sala, il fondo curvo della platea, il tetto a padiglione, il portico sulla facciata (+Z). */
+function theatre(M: Mason): void {
+  footing(M, 26, 46);
+  M.box("plaster", -12, 0, -16, 12, 18, 17);
+  M.drum("plaster", 0, -16, 12, 0, 18, {}, 12, 24);
+  M.box("stone", -12.3, 0, -16, 12.3, 1.2, 17.3, { tint: DARK });
+  M.box("stone", -12.4, 17.6, -16, 12.4, 18.4, 17.4, { tint: DARK, under: true });
+  M.in(0, 0, 0, 0, () => M.hip("slate", 12.6, 17.6, 18.4, 6.5));
+  M.drum("slate", 0, -16, 12.6, 18.4, 22, {}, 4, 24);
+  for (let i = -2; i <= 2; i++) {   // il portico: sei pilastri, la trabeazione, la falda
+    M.box("stone", i * 4.6 - 0.5, 0, 17, i * 4.6 + 0.5, 7, 21);
+  }
+  M.box("stone", -12.2, 7, 17, 12.2, 8.2, 21.2, { tint: DARK });
+  M.in(0, 8.2, 19.1, 0, () => M.hip("slate", 12.4, 2.3, 0, 1.4));
+  M.in(0, 0, 17.02, 0, () => door(M, 0, 2.6, 4.4, true));
+  for (const s of [-1, 1]) for (let j = 0; j < 4; j++) M.in(s * 12.02, 0, -10 + j * 7, s * PI / 2, () => door(M, 0, 1.6, 4.2, true));   // (finte: le finestre alte del fianco)
+  M.solid(-12, -28, 12, 21);
+}
+
 export function createTown(scene: Scene, def: LocationDef, opts: { editor?: boolean } = {}): Town {
+  OPEN.length = 0;
   // (ogni elemento del file estrae dal suo seme, `variant`; questo resta per ciò che non è un elemento: mura, porta, selciati)
   let rnd = mulberry32(0x70A1);
   // (un `let`: l'editor costruisce un elemento da solo, `build`, scambiando il muratore; i generatori leggono questo)
@@ -907,12 +1121,12 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
   // (ogni finestra è un lume: accesa o spenta lo decide chi c'è dentro, non un numero a caso; il numero si estrae lo stesso)
   const lit = (): string => (rnd(), "lume");
   /** Gli edifici in cui si entra: quale interno, dove sta, come è girato, ingombro e seme della pianta. Si costruiscono dopo le mesh della città. */
-  const sites: { id: string; kind: InteriorId; x: number; z: number; yaw: number; size: [number, number]; seed: number; scale: number }[] = [];
+  const sites: { id: string; kind: InteriorId; x: number; y: number; z: number; yaw: number; size: [number, number]; seed: number; scale: number }[] = [];
   /** I pezzi di rete degli abitanti che vengono dagli interni (nodi con quota, collegamenti, posti): il nodo 0 di ognuno sta in strada. */
   const plans: Pick<Built, "nodes" | "links" | "spots">[] = [];
-  const enter = (c: ChildDef, yaw: number, size: [number, number]): void => { if (c.interior) sites.push({ id: c.id!, kind: c.interior, x: c.at[0], z: c.at[1], yaw, size, seed: seedOf(c), scale: c.scale }); };
+  const enter = (c: ChildDef, yaw: number, size: [number, number]): void => { if (c.interior) sites.push({ id: c.id!, kind: c.interior, x: c.at[0], y: townGround(TOWN.x + c.at[0], TOWN.z + c.at[1]), z: c.at[1], yaw, size, seed: seedOf(c), scale: c.scale }); };
   /** Esegue `f` nel riferimento di una cosa posata. */
-  const place = (c: ChildDef, f: () => void): void => M.in(c.at[0], 0, c.at[1], rad(c.yaw), f, 0, c.scale);
+  const place = (c: ChildDef, f: () => void): void => M.in(c.at[0], rise(M, c.at[0], c.at[1]), c.at[1], rad(c.yaw), f, 0, c.scale);
   // le finestre accese di ogni casa con un nome: quali vertici della mesh dei lumi sono suoi (da, a), per accenderle e spegnerle (`windows`)
   const glow = new Map<string, { x: number; y: number; z: number }[]>();   // per edificio: dove cade sulla strada la luce delle sue finestre
   const thru = new Map<string, number[]>();   // per edificio: i vertici dei lumi che stanno dietro un vetro trasparente (da, a, da, a…)
@@ -931,10 +1145,36 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
       const pts: V3[] = [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]];
       M.poly(k, pts, [0, 1, 0], diag ? { uv: 2.2 } : {}, diag ? pts.map(([x, , z]) => [(x - z) * 0.707, 0, (x + z) * 0.707] as V3) : pts);
     };
+    /** Un nastro di selciato lungo una spezzata, che segue il suolo: un pezzo per metro, i bordi a squadra con la mezzeria. */
+    const ribbon = (k: string, line: [number, number][], hw: number, y: number): void => {
+      const pts: [number, number][] = [];
+      for (let i = 0; i < line.length - 1; i++) {
+        const [ax, az] = line[i], [bx, bz] = line[i + 1], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az)));
+        for (let j = i ? 1 : 0; j <= n; j++) pts.push([ax + (bx - ax) * j / n, az + (bz - az) * j / n]);
+      }
+      const side = pts.map(([x, z], i) => {
+        const [px, pz] = pts[Math.max(0, i - 1)], [qx, qz] = pts[Math.min(pts.length - 1, i + 1)], l = Math.hypot(qx - px, qz - pz) || 1;
+        return [-(qz - pz) / l * hw, (qx - px) / l * hw] as [number, number];
+      });
+      // pieno fino all'88% della larghezza, poi l'ultima fascia scende 6 cm sotto il suolo: la terra copre il bordo a tratti.
+      // E il bordo non è una riga: largo un po' di più o di meno a ogni metro (dalla posizione, non da `rnd`).
+      // ⚠️ Non far scendere il nastro dal mezzo: si vedrebbe solo il terzo centrale (la via sembra stretta).
+      const wob = (x: number, z: number, s: number): number => 1 + 0.12 * Math.sin(x * 1.7 + z * 2.3 + s * 4.1) * Math.sin(x * 0.61 - z * 0.83 + s);
+      const ACROSS = [-1, -0.88, 0, 0.88, 1];
+      const at = (i: number, s: number): V3 => {
+        const edge = Math.abs(s) === 1, w = edge ? wob(pts[i][0], pts[i][1], s) * s : s, x = pts[i][0] + side[i][0] * w, z = pts[i][1] + side[i][1] * w;
+        return [x, rise(M, x, z) + (edge ? -0.06 : y), z];
+      };
+      for (let i = 0; i < pts.length - 1; i++) for (let j = 0; j < ACROSS.length - 1; j++) {
+        const s0 = ACROSS[j], s1 = ACROSS[j + 1];
+        M.poly(k, [at(i, s0), at(i, s1), at(i + 1, s1), at(i + 1, s0)], [0, 1, 0]);
+      }
+    };
     layPaving = (list) => {
       const laid: Record<string, number> = {};
       for (const p of list) {
         const [[ax, az], [bx, bz]] = p.line, h = p.width / 2, [k, y] = PAVING[p.kind], n = laid[p.kind] = (laid[p.kind] ?? -1) + 1;
+        if (p.line.length > 2 || (ax !== bx && az !== bz)) { ribbon(k, p.line, h, y + n * 0.002); continue; }
         // ogni striscia dello stesso selciato sta 2 mm sopra la precedente
         if (az === bz) pave(k, Math.min(ax, bx), az - h, Math.max(ax, bx), az + h, y + n * 0.002, p.kind === "lastre.diagonali");
         else pave(k, ax - h, Math.min(az, bz), ax + h, Math.max(az, bz), y + n * 0.002, p.kind === "lastre.diagonali");
@@ -960,15 +1200,58 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     };
     // ⚠️ i cerchi delle mura fermano a ogni quota: dove toccano la porta, se dentro ci si sale, vanno tenuti fuori dalle sue torri
     const guard = def.gate?.interior ? def.gate : null, trim = guard ? 0.8 : 0, gk = def.gate?.scale ?? 1;   // (la porta ingrandita: le mura la raggiungono più in là)
-    wall(-hx, -hz, -hx, -5 * gk, 0, trim); wall(-hx, 5 * gk, -hx, hz, trim, 0); wall(-hx, hz, hx, hz); wall(hx, hz, hx, -hz); wall(hx, -hz, -hx, -hz);
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const gp = def.gate?.at ?? [-hx, 0], gy = rad(def.gate?.yaw ?? -90);
+    /** Sull'acqua (le mura si aprono dove passa il fiume). */
+    const wet = (x: number, z: number): boolean => !!def.river && townGround(TOWN.x + x, TOWN.z + z) < def.river.level + 0.6;
+    if (def.walls) {
+      // ── mura a poligono, che seguono il suolo: tratti di 8 m circa, ognuno alla quota del suo mezzo con lo zoccolo fino a terra ──
+      const ring = def.walls, t = 0.8;
+      /** Un tratto di mura da (ax, az) a (bx, bz), a pezzi di 8 m circa. */
+      const run = (ax: number, az: number, bx: number, bz: number): void => {
+        const L = Math.hypot(bx - ax, bz - az), n = Math.max(1, Math.round(L / 8)), l = L / n, yaw = Math.atan2(-(bz - az), bx - ax);
+        for (let k = 0; k < n && L > 0.5; k++) {
+          const mx = ax + (bx - ax) * (k + 0.5) / n, mz = az + (bz - az) * (k + 0.5) / n;
+          if (wet(mx, mz)) continue;
+          M.in(mx, rise(M, mx, mz), mz, yaw, () => {
+            const drop = Math.max(0, -rise(M, -l / 2, 0), -rise(M, l / 2, 0)), h = l / 2 + 0.05;
+            M.box("stone", -h, -drop - 0.3, -t, h, 8, t);
+            M.box("stone", -h, -drop - 0.3, -t - 0.16, h, 1.1, t + 0.16, { tint: DARK });                       // lo zoccolo
+            M.box("stone", -h, 7.5, -t - 0.16, h, 7.8, t + 0.16, { tint: DARK, under: true });                 // il cordolo sotto i merli
+            for (let j = 0, m = Math.max(1, Math.floor(l / 2.4)); j < m; j++) {
+              const x = -l / 2 + l * (j + 0.5) / m;
+              M.box("stone", x - 0.7, 8, -t, x + 0.7, 9, t);
+              M.box("stone", x - 0.76, 9, -t - 0.06, x + 0.76, 9.14, t + 0.06, { tint: DARK, under: true });
+            }
+            M.line(-l / 2, 0, l / 2, 0, t);
+          });
+        }
+      };
+      const tower = 5 * gk + 0.4;   // (mezza larghezza della porta con le sue torri)
+      ring.forEach(([ax, az], i) => {
+        const [bx, bz] = ring[(i + 1) % ring.length], L = Math.hypot(bx - ax, bz - az), ux = (bx - ax) / L, uz = (bz - az) / L;
+        const t = (gp[0] - ax) * ux + (gp[1] - az) * uz, off = Math.abs((gp[0] - ax) * uz - (gp[1] - az) * ux);
+        if (off < 3 && t > -tower && t < L + tower) {   // la porta sta su questo lato: le mura arrivano alle sue torri, da una parte e dall'altra
+          if (t - tower > 0) run(ax, az, ax + ux * (t - tower), az + uz * (t - tower));
+          if (t + tower < L) run(ax + ux * (t + tower), az + uz * (t + tower), bx, bz);
+        } else run(ax, az, bx, bz);
+        if (Math.hypot(ax - gp[0], az - gp[1]) < 8 * gk || wet(ax, az)) return;
+        M.in(ax, rise(M, ax, az), az, 0, () => {   // la torre sullo spigolo
+          footing(M, 5, 5);
+          M.box("stone", -2.5, 0, -2.5, 2.5, 11, 2.5);
+          for (const y of [0, 5.6, 10.6]) M.box("stone", -2.64, y, -2.64, 2.64, y + (y ? 0.32 : 1.3), 2.64, { tint: DARK, under: true });
+          M.pyramid("slate", -2.9, -2.9, 2.9, 2.9, 11, 15.5);
+          M.solid(-2.5, -2.5, 2.5, 2.5, 0.8);
+        });
+      });
+    } else wall(-hx, -hz, -hx, -5 * gk, 0, trim), wall(-hx, 5 * gk, -hx, hz, trim, 0), wall(-hx, hz, hx, hz), wall(hx, hz, hx, -hz), wall(hx, -hz, -hx, -hz);
+    if (!def.walls) for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
       M.box("stone", sx * hx - 2.5, 0, sz * hz - 2.5, sx * hx + 2.5, 11, sz * hz + 2.5);
       for (const y of [0, 5.6, 10.6]) M.box("stone", sx * hx - 2.64, y, sz * hz - 2.64, sx * hx + 2.64, y + (y ? 0.32 : 1.3), sz * hz + 2.64, { tint: DARK, under: true });   // zoccolo e marcapiani
       M.pyramid("slate", sx * hx - 2.9, sz * hz - 2.9, sx * hx + 2.9, sz * hz + 2.9, 11, 15.5);
       M.solid(sx * hx - 2.5, sz * hz - 2.5, sx * hx + 2.5, sz * hz + 2.5, 0.8);
     }
-    if (guard) sites.push({ id: guard.id, kind: "porta", x: -hx, z: 0, yaw: PI / 2, size: [10, 5.2], seed: seedOf(guard), scale: gk });   // (la pianta guarda la città: mezzo giro rispetto alla porta)
-    M.in(-hx, 0, 0, -PI / 2, () => {   // la porta: il fuori è a +Z
+    if (guard) sites.push({ id: guard.id, kind: "porta", x: gp[0], y: townGround(TOWN.x + gp[0], TOWN.z + gp[1]), z: gp[1], yaw: gy + PI, size: [10, 5.2], seed: seedOf(guard), scale: gk });   // (la pianta guarda la città: mezzo giro rispetto alla porta)
+    M.in(gp[0], rise(M, gp[0], gp[1]), gp[1], gy, () => {   // la porta: il fuori è a +Z
       for (const s of [-1, 1]) {
         const x0 = s * 3.6 - 1.4, x1 = s * 3.6 + 1.4, xi = s < 0 ? x1 : x0, xo = s < 0 ? x0 : x1;
         if (!guard) { M.box("stone", x0, 0, -2.6, x1, 14, 2.6); M.solid(x0, -2.6, x1, 2.6, 0.7); continue; }
@@ -994,6 +1277,15 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
         drape(M, -0.6, 6.4, 0.6, 7.9, 0.04, VINO, 0.3); M.disc("cloth", 0, 7.15, 0.3, 0.07, { tint: ORO, wave: (p) => (7.9 - p[1]) / 1.8 });
       });
     }, 0, gk);
+
+    // ── il fiume: un nastro d'acqua alla sua quota, più largo dell'alveo (le sponde lo coprono) ──
+    if (def.river) {
+      const r = def.river, y = r.level - TOWN.y, hw = r.width / 2 + 4;
+      for (let i = 0; i < r.line.length - 1; i++) {
+        const [ax, az] = r.line[i], [bx, bz] = r.line[i + 1], l = Math.hypot(bx - ax, bz - az), nx = -(bz - az) / l * hw, nz = (bx - ax) / l * hw, ex = (bx - ax) / l * hw, ez = (bz - az) / l * hw;
+        M.poly("acqua", [[ax - ex - nx, y, az - ez - nz], [ax - ex + nx, y, az - ez + nz], [bx + ex + nx, y, bz + ez + nz], [bx + ex - nx, y, bz + ez - nz]], [0, 1, 0]);
+      }
+    }
 
     // ── i generatori: una chiave del file, una funzione. Ognuno lavora nel riferimento della cosa (facciata a +Z) ──
     PREFABS = {
@@ -1239,6 +1531,11 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
       for (const s of [-1, 1]) M.in(s * 0.04, 0, 0.75, s * PI / 2, () => M.disc("cloth", 0, 2.93, 0.19, 0, { tint: TELI[c.tint ?? "ocra"] }, 10));
     }),
     panni: (c) => span(M, c),
+    ponte: (c) => bridge(M, c),
+    "ponte.botteghe": (c) => bridge(M, c),
+    scala: (c) => stairs(M, c),
+    "scala.parapetto": (c) => stairs(M, c),
+    teatro: (c) => place(c, () => theatre(M)),
     // orto: quattro file di cavoli, dall'angolo in poi verso est e nord
     orto: (c) => place(c, () => { for (let i = 0; i < 4; i++) for (let j = 0; j < 9; j++) M.box("cloth", j * 0.8, 0, i * 0.85, 0.3 + j * 0.8, 0.14 + rnd() * 0.16, 0.3 + i * 0.85, { tint: MUSCHIO }); }),
     // lapidi: due file da cinque, un po' storte
@@ -1267,10 +1564,11 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
   });
 
   // ── materiali e mesh ──
+  setMossGround(scene, reliefGrid(), TOWN.y);   // (il muschio al piede dei muri, sul suolo vero: prima dei materiali)
   const surf = (name: string, tex: ReturnType<typeof masonryTex>, tint?: Color3, rough?: number, relief?: number, moss?: number): Material => {
     const m = surfaceMaterial(scene, `town_${name}`, tex, { tint, rough, relief, moss: moss ? { y: TOWN.y, k: moss } : undefined });
     // col cel shading: la texture dipinta al posto della foto (colore e normali; la mappa di occlusione e ruvidezza della foto non c'entra più)
-    const kind = ({ stone: "stone", plaster: "plaster", timber: "wood", wood: "wood", slate: "slate", tile: "tile", flag: "flag", sett: "sett", cobble: "cobble" } as Record<string, Painted>)[name];
+    const kind = ({ stone: "stone", plaster: "plaster", timber: "wood", wood: "wood", slate: "slate", tile: "tile", flag: "flag", sett: "sett", cobble: "cobble", brick: "brick" } as Record<string, Painted>)[name];
     if (kind) {
       const photo = { a: m.albedoTexture, n: m.bumpTexture, arm: m.metallicTexture, met: m.metallic, r: m.roughness };
       onPainted((on) => {
@@ -1304,6 +1602,8 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     fire: flat("fire", Color3.Black(), new Color3(1.2, 0.5, 0.12)),
     // il vetro vero delle finestre aperte: una lastra scura quasi trasparente (da tutte e due le parti)
     vetro: glassMat(scene),
+    acqua: waterMat(scene),   // il fiume
+    brick: surf("brick", brickFloorTex(scene), new Color3(0.95, 0.85, 0.8)),   // i mattoni delle scale
   };
   const meshes: Mesh[] = [], byChild: Mesh[][] = [];
   for (const [k, g] of M.geos) {
@@ -1349,10 +1649,10 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
   const streets = nodes.length, road = links.slice();
   for (const b of [...built, ...plans]) {
     if (!streets || !b.nodes.length) continue;
-    const base = nodes.length, [dx, dz] = b.nodes[0];
+    const base = nodes.length, [dx, dz, dy] = b.nodes[0];
     const near = nodes.slice(0, streets).map((n, i) => [Math.hypot(n[0] - dx, n[1] - dz), i]).sort((p, q) => p[0] - q[0]);
     // (dal più vicino, fermandosi al primo buono: provarli tutti contro tutti gli ostacoli costava due secondi di caricamento)
-    const clear = ([, i]: number[]): boolean => clearWay(colliders, nodes[i][0], nodes[i][1], dx, dz, TOWN.y, TOWN.y, 0.03);
+    const clear = ([, i]: number[]): boolean => clearWay(colliders, nodes[i][0], nodes[i][1], dx, dz, townGround(nodes[i][0], nodes[i][1]), dy ?? townGround(dx, dz), 0.03);
     const first = near.find(clear), next = first && near.find((n) => road.some(([p, q]) => (p === n[1] && q === first[1]) || (q === n[1] && p === first[1])) && clear(n));
     nodes.push(...b.nodes);
     links.push(...b.links.map(([p, q]): [number, number] => [p + base, q + base]), ...(first ? (next ? [first, next] : [first]) : near.slice(0, 1)).map(([, i]): [number, number] => [i, base]));
@@ -1417,11 +1717,11 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
    * posti dei lampioni) si butta: arriva salvando. Le copie da modello che dichiara le restituisce, per chi le vuole posare.
    */
   const build = (c: ChildDef, i: number): { meshes: Mesh[]; props: Want[] } => {
-    const keep = { M, rnd, posts, lamps: LAMPS.length, flames: flames.length, sites: sites.length, plans: plans.length }, fl = markFlames(), pm = markProps();
+    const keep = { M, rnd, posts, lamps: LAMPS.length, flames: flames.length, sites: sites.length, plans: plans.length, open: OPEN.length }, fl = markFlames(), pm = markProps();
     M = new Mason(); rnd = mulberry32(variantOf(c)); propOwner(i);
     const m = M;
     try { M.in(TOWN.x, TOWN.y, TOWN.z, 0, () => PREFABS[c.prefab](c)); }
-    finally { M = keep.M; rnd = keep.rnd; posts = keep.posts; LAMPS.length = keep.lamps; flames.length = keep.flames; sites.length = keep.sites; plans.length = keep.plans; fl(); propOwner(-1); }
+    finally { M = keep.M; rnd = keep.rnd; posts = keep.posts; LAMPS.length = keep.lamps; flames.length = keep.flames; sites.length = keep.sites; plans.length = keep.plans; OPEN.length = keep.open; fl(); propOwner(-1); }
     return { meshes: meshesOf(m, `elemento${i}`), props: takeProps(pm) };
   };
   /** I selciati rifatti da soli (l'editor li ridisegna mentre se ne trascina un capo). */
@@ -1441,7 +1741,7 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     editor: opts.editor ? { parts: def.children.map((_, i) => byChild[i] ?? []), span: spanAlone, replan, build, paving: pavingAlone, pavingMeshes: meshes.filter((m) => m.name.endsWith("#selciati")) } : undefined,
     windows, light, lamps: LAMPS.map((l) => ({ id: l.id, x: l.p.x, z: l.p.z })),
     meshes, colliders, plan,
-    floors: built.flatMap((b) => b.floors), doors: built.flatMap((b) => b.doors), interiors: built.map((b) => b.interior), lumi: { finestre: mats.lume as StandardMaterial, lanterne: mats.lamp as StandardMaterial },
+    floors: [...built.flatMap((b) => b.floors), ...OPEN], doors: built.flatMap((b) => b.doors), interiors: built.map((b) => b.interior), lumi: { finestre: mats.lume as StandardMaterial, lanterne: mats.lamp as StandardMaterial },
   };
 }
 
@@ -1451,7 +1751,7 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
  * arrivare dritti a ogni posto (l'ultimo metro non conta: è l'arredo su cui il posto sta). Restituisce i problemi.
  * Dentro gli edifici lo stesso controllo, più fino, lo fa `problems` di layouts.ts (npm run check).
  */
-export function checkPlan(town: Town, ground: (x: number, z: number) => number): string[] {
+export function checkPlan(town: Town, ground: (x: number, z: number) => number, skip = new Set<string>()): string[] {
   const { nodes, links, spots } = town.plan, out: string[] = [], y = (n: [number, number, number?]): number => n[2] ?? ground(n[0], n[1]);
   const seen = new Set([0]);
   for (let grew = true; grew;) { grew = false; for (const [a, b] of links) if (seen.has(a) !== seen.has(b)) { seen.add(a); seen.add(b); grew = true; } }
@@ -1461,6 +1761,7 @@ export function checkPlan(town: Town, ground: (x: number, z: number) => number):
     if (!clearWay(town.colliders, A[0], A[1], B[0], B[1], y(A), y(B), 0.03)) out.push(`tratto ${a}–${b} da (${A[0].toFixed(1)}, ${A[1].toFixed(1)}) a (${B[0].toFixed(1)}, ${B[1].toFixed(1)}): sbarrato`);
   }
   for (const [name, s] of Object.entries(spots)) {
+    if (skip.has(name)) continue;
     const sy = s.y ?? ground(s.x, s.z), far = (n: [number, number, number?]): number => Math.hypot(n[0] - s.x, n[1] - s.z) + Math.abs(y(n) - sy) * 6;
     const i = nodes.reduce((b, n, k) => (far(n) < far(nodes[b]) ? k : b), 0), N = nodes[i], d = Math.hypot(N[0] - s.x, N[1] - s.z), k = d > 1.4 ? (d - 1.4) / d : 0;
     if (!seen.has(i)) out.push(`${name}: il nodo più vicino (${i}) è staccato dalla rete`);

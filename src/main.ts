@@ -10,6 +10,7 @@ import { Clock } from "./clock";
 import { Sleep } from "./sleep";
 import { arrival, createTerrain, layWorld, loadLift, PITS } from "./world/terrain";
 import { createUnderground } from "./world/underground";
+import { createMountains } from "./world/mountains";
 import { placeProps } from "./world/props";
 import { loadKit } from "./world/kit";
 import { createFlameLights, createFlames } from "./world/flames";
@@ -41,7 +42,7 @@ import { Doors } from "./world/doors";
 import { Levels } from "./world/levels";
 import { DbError, loadDb, STATS, type ItemDef, type SkillDef } from "./data/db";
 import { derive, need, unlocked, type Tune } from "./data/character";
-import { TOWN, townDist } from "./world/terrain";
+import { GATE, TOWN, townDist, townGround } from "./world/terrain";
 
 // L'atmosfera dei due stili grafici (style.ts).
 //   moderno: sole caldo, colori pieni, raggi fra i tronchi;
@@ -205,6 +206,7 @@ async function main(): Promise<void> {
   const t0 = performance.now();
   const lap = (what: string): void => console.log(`[load] ${what}: ${Math.round(performance.now() - t0)} ms`);
   const terrain = createTerrain(scene);
+  createMountains(scene, TOWN.x, TOWN.z);   // lo sfondo: le creste lontane attorno alla città
   lap("terreno");
   terrain.mesh.material = terrainMaterial(scene, {
     grass: grassGroundTex(scene), floor: forestFloorTex(scene), dirt: dirtTex(scene), rock: rockTex(scene), moss: mossTex(scene),
@@ -235,9 +237,9 @@ async function main(): Promise<void> {
   // gli stormi: piccioni di giorno, pipistrelli col buio; partono e si posano sui tetti alti (cattedrale, municipio, porta)
   const roosts = ([["cattedrale", 31], ["municipio", 24]] as const).flatMap(([prefab, h]): [number, number, number][] => {
     const c = db.locations.find((l) => l.kind === "settlement")!.children.find((k) => k.prefab === prefab);
-    return c ? [[TOWN.x + c.at[0], TOWN.y + h, TOWN.z + c.at[1]]] : [];
+    return c ? [[TOWN.x + c.at[0], townGround(TOWN.x + c.at[0], TOWN.z + c.at[1]) + h, TOWN.z + c.at[1]]] : [];
   });
-  const flocks = createFlocks(scene, [...roosts, [TOWN.x - TOWN.hx, TOWN.y + 25, TOWN.z]], [TOWN.x, TOWN.z], 32);
+  const flocks = createFlocks(scene, [...roosts, [GATE.x, townGround(GATE.x, GATE.z) + 25, GATE.z]], [TOWN.x, TOWN.z], 32);
   let fireT = 0;
   // tutto ciò che ferma il passo del giocatore: massi, tronchi, muri della città e, più sotto, gli abitanti
   const solid = [...rocks.colliders, ...veg.colliders, ...town.colliders];
@@ -867,7 +869,8 @@ async function main(): Promise<void> {
   if (import.meta.env.DEV) {
     Object.assign(window, { scene, player, enemies, npcs, levels, solid, clock, setHour, sleep, town, state, dialogue, list, interact, pick, earn, choose, retune, save, load: resume, fireLights, fire, syncLights, lampState, warm, marker: () => marker, tuneNow: () => nums, checkPlan: () => checkPlan(town, levels.ground) });   // debug da console
     // il controllo della rete degli abitanti (percorsi sgombri, posti raggiungibili): a ogni avvio in sviluppo
-    const bad = checkPlan(town, levels.ground);
+    // (il fondo di cripte e grotte non sta sulla rete: nessun abitante ci scende, e un nodo senza quota starebbe sul terreno sopra la camera)
+    const bad = checkPlan(town, levels.ground, new Set(Object.keys(under.spots).filter((k) => !k.endsWith(".ingresso"))));
     if (bad.length) console.warn(`[posti] ${bad.length} problemi nella rete degli abitanti:\n  ${bad.join("\n  ")}`);
     // dove si è, per scrivere db.json: coordinate del mondo e, in città, locali alla città. F2 le copia.
     const where = document.createElement("div");

@@ -6,7 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** La versione del salvataggio: se la forma dello stato cambia va alzata, e i salvataggi vecchi non si caricano. */
-export const SAVE = 2;
+export const SAVE = 3;   // (3: la città sul meandro, le posizioni di prima non valgono più)
 
 export class State {
   flags = new Set<string>();

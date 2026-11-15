@@ -25,6 +25,8 @@ export interface Floor {
   rise?: number;
   /** Spessore del solaio sotto la superficie: chi sta sotto ci batte la testa. Assente = nessun soffitto (una rampa aperta). */
   thick?: number;
+  /** All'aperto (un ponte): chi non dice a che quota sta (`ground` senza `y`, come i posti e i nodi di strada) ci sta sopra. */
+  open?: boolean;
 }
 
 /** Il gradino che si sale senza saltare, e l'altezza di chi cammina. */
@@ -70,7 +72,7 @@ export class Levels {
     if (!floors) return t;
     const top = (y ?? t) + STEP, hole = this.holes.some((h) => x > h[0] && x < h[2] && z > h[1] && z < h[3]);
     let best = !hole && t <= top ? t : -Infinity;
-    for (const f of floors) { const h = this.at(f, x, z); if (h <= top && h > best) best = h; }   // NaN non passa nessun confronto
+    for (const f of floors) { const h = this.at(f, x, z); if ((h <= top || (y === undefined && f.f.open)) && h > best) best = h; }   // NaN non passa nessun confronto
     // sotto il terreno senza un pavimento si torna in superficie (non dovrebbe capitare: il sottosuolo ha sempre un pavimento)
     return best === -Infinity ? t : best;
   };

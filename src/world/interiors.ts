@@ -59,8 +59,8 @@ export interface InteriorOptions {
   scale: number;
   /** Un muratore nuovo (town.ts): qui se ne usa uno per l'interno e uno per ogni battente. */
   mason: () => Mason;
-  /** Dove sta l'edificio nella città e come è girato. */
-  x: number; z: number; yaw: number;
+  /** Dove sta l'edificio nella città e come è girato; `y` = la quota del suo piano terra nel mondo (senza: il piano della città). */
+  x: number; z: number; yaw: number; y?: number;
   /** Materiali della città: il legno delle porte (l'uscio si vede da fuori) e il lume delle fiamme. */
   wood: Material; lume: Material;
 }
@@ -286,6 +286,8 @@ export class Kit {
   blocks = false;
   /** Ha finestre aperte sulla strada. */
   thru = false;
+  /** La quota del piano terra dell'edificio, nel mondo. */
+  base = 0;
 
   constructor(readonly scene: Scene, I: Mason, readonly id: string, readonly make: () => Mason, readonly wood: Material | null, readonly plain = false) { this.I = I; }
 
@@ -917,14 +919,14 @@ function build(K: Kit, L: Layout): void {
         const two = o.w >= 1.6, hy = h + (o.arch ? 0.1 : 0.04), z = zl - 0.065;
         // un'anta sola si apre contro il muro più vicino
         const a = face(r, o.side), side = (o.at - a.a0 < a.a1 - o.at ? -1 : 1) * (K.at(1, 0, 0)[a.ax ? 0 : 2] - K.at(0, 0, 0)[a.ax ? 0 : 2] > 0 ? 1 : -1);
-        K.doors.push({ y: TOWN.y + r.y, angle: PI / 2, leaves: two ? [K.leaf(`${name}_a`, [jw, 0, z], [0, 0, z], hy, 0.06, -1, true), K.leaf(`${name}_b`, [-jw, 0, z], [0, 0, z], hy, 0.06, 1, true)]
+        K.doors.push({ y: K.base + r.y, angle: PI / 2, leaves: two ? [K.leaf(`${name}_a`, [jw, 0, z], [0, 0, z], hy, 0.06, -1, true), K.leaf(`${name}_b`, [-jw, 0, z], [0, 0, z], hy, 0.06, 1, true)]
           : [K.leaf(name, [side * jw, 0, z], [-side * hw, 0, z], hy, 0.06, -side as 1 | -1, true)] });
         return;
       }
       // una porta fra due stanze: il telaio (due montanti e l'architrave, che fanno anche da spalletta) e l'anta, che si apre nell'altra stanza
       for (const s of [-1, 1]) K.box("wood", Math.min(s * hw, s * (hw + 0.1)), 0, -0.02, Math.max(s * hw, s * (hw + 0.1)), h, t + 0.02, TRAVE);
       K.box("wood", -hw - 0.1, h, -0.02, hw + 0.1, h + 0.12, t + 0.02, TRAVE, { under: true });
-      K.doors.push({ y: TOWN.y + r.y + o.y0, angle: PI / 2, leaves: [K.leaf(name, [hw, 0, t], [-hw, 0, t], h, 0.05, 1, false)] });
+      K.doors.push({ y: K.base + r.y + o.y0, angle: PI / 2, leaves: [K.leaf(name, [hw, 0, t], [-hw, 0, t], h, 0.05, 1, false)] });
     });
   });
 
@@ -980,7 +982,8 @@ export function createInterior(scene: Scene, opt: InteriorOptions): Built {
   LUME = opt.lume;
   const K = new Kit(scene, opt.mason(), opt.id, opt.mason, opt.wood), zones: Box[] = [];
   // (le fiamme di dentro sono del gruppo dell'edificio: si accendono e si spengono con chi c'è)
-  group(opt.id, () => K.I.in(TOWN.x, TOWN.y, TOWN.z, 0, () => K.I.in(opt.x, 0, opt.z, opt.yaw, () => {
+  K.base = opt.y ?? TOWN.y;
+  group(opt.id, () => K.I.in(TOWN.x, K.base, TOWN.z, 0, () => K.I.in(opt.x, 0, opt.z, opt.yaw, () => {
     K.frame();
     const L = layout(opt.kind, opt.size[0], opt.size[1], mulberry32(opt.seed), opt.scale);
     K.thru = L.openings.some((o) => o.deep !== undefined);

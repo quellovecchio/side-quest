@@ -19,7 +19,7 @@ import { DbError, type Db, type LocationDef } from "../data/db";
 export const WORLD = 320;
 export const HALF = WORLD / 2;
 /** Quanto il terreno prosegue a est della conca (la valle della città). */
-export const EAST = 200;
+export const EAST = 350;
 // ⚠️ Questi valori arrivano dal file con `layWorld`: sono gli stessi oggetti per tutta la partita (si riempiono sul posto)
 // e vanno letti solo DENTRO le funzioni, mai al caricamento di un modulo (lì sono ancora vuoti).
 /** Dove comincia la partita (il luogo `spawn` del file). */
@@ -34,6 +34,8 @@ export function arrival(l: LocationDef): { x: number; z: number; look?: { x: num
 }
 /** La città: centro, mezzi lati del rettangolo delle mura, quota del piano. La porta è a ovest, in (x − hx, z). */
 export const TOWN = { x: 0, z: 0, hx: 0, hz: 0, y: 0 };
+/** La porta della città, nel mondo: lì finiscono le strade (`gate.at` nel file, o il lato ovest del rettangolo). */
+export const GATE = { x: 0, z: 0 };
 type Line = [number, number][];
 /**
  * Una discesa nel sottosuolo (i luoghi `crypt` e `cave`): dove comincia (x, z), verso dove scende (dx, dz: un asse), quanto è
@@ -63,6 +65,10 @@ export const greenAt = (x: number, z: number): boolean => GREENS.some(([x0, z0, 
 export function layWorld(db: Db): void {
   const town = db.locations.find((l) => l.kind === "settlement")!, start = db.locations.find((l) => l.id === db.spawn)!;
   Object.assign(TOWN, { x: town.at[0], z: town.at[1], hx: town.ground!.rect[0], hz: town.ground!.rect[1], y: town.ground!.level });
+  WALLS = (town.walls ?? []).map(([x, z]): [number, number] => [TOWN.x + x, TOWN.z + z]);
+  RIVER = town.river ? { line: town.river.line.map(([x, z]): [number, number] => [TOWN.x + x, TOWN.z + z]), hw: town.river.width / 2 } : null;
+  const g = town.gate?.at ?? [-TOWN.hx, 0];
+  Object.assign(GATE, { x: TOWN.x + g[0], z: TOWN.z + g[1] });
   // la città con il suo margine (la strada che arriva, il piano che si raccorda) deve stare sul terreno
   if (TOWN.x - TOWN.hx < -HALF + 15 || TOWN.x + TOWN.hx > HALF + EAST - 15 || Math.abs(TOWN.z) + TOWN.hz > HALF - 15) throw new DbError(`db.json.locations: "${town.id}" esce dal terreno (x da ${-HALF + 15} a ${HALF + EAST - 15}, z entro ±${HALF - 15}, mura comprese)`);
   // ⚠️ SPAWN è la RADURA (rocce e piante la lasciano sgombra), non dove comincia la partita: quello è `db.spawn`, e lo usa main.ts
@@ -72,7 +78,7 @@ export function layWorld(db: Db): void {
   PITS.push(...db.locations.filter((l) => l.kind === "crypt" || l.kind === "cave").map(pit));
   CLEARINGS = db.locations.filter((l) => l.kind === "clearing").map((l) => l.at);
   TRAILS = db.roads.filter((d) => d.kind === "trail").map((d) => d.line);
-  ROADS = db.roads.filter((d) => d.kind === "road").map((d): Line => [...d.line, [TOWN.x - TOWN.hx, TOWN.z]]);
+  ROADS = db.roads.filter((d) => d.kind === "road").map((d): Line => [...d.line, [GATE.x, GATE.z]]);
   GREENS = town.green.map(([[ax, az], [bx, bz]]) => [TOWN.x + Math.min(ax, bx), TOWN.z + Math.min(az, bz), TOWN.x + Math.max(ax, bx), TOWN.z + Math.max(az, bz)]);
 }
 
@@ -89,10 +95,20 @@ function along(line: [number, number][], x: number, z: number): { d: number; t: 
   return { d, t };
 }
 
-/** Distanza fuori dal rettangolo delle mura (0 dentro). */
+/** Le mura della città nel mondo (`walls` nel file; vuoto: il rettangolo) e il fiume (mezzeria nel mondo, mezza larghezza). */
+let WALLS: Line = [], RIVER: { line: Line; hw: number } | null = null;
+/** Distanza fuori dalle mura (0 dentro): dal poligono se il file lo dà, altrimenti dal rettangolo. */
 export function townDist(x: number, z: number): number {
-  return Math.hypot(Math.max(0, Math.abs(x - TOWN.x) - TOWN.hx), Math.max(0, Math.abs(z - TOWN.z) - TOWN.hz));
+  if (!WALLS.length) return Math.hypot(Math.max(0, Math.abs(x - TOWN.x) - TOWN.hx), Math.max(0, Math.abs(z - TOWN.z) - TOWN.hz));
+  let inside = false;
+  for (let i = 0, j = WALLS.length - 1; i < WALLS.length; j = i++) {
+    const [ax, az] = WALLS[i], [bx, bz] = WALLS[j];
+    if ((az > z) !== (bz > z) && x < (bx - ax) * (z - az) / (bz - az) + ax) inside = !inside;
+  }
+  return inside ? 0 : along([...WALLS, WALLS[0]], x, z).d;
 }
+/** Distanza dalla riva del fiume della città (negativa nell'acqua; Infinity senza fiume): lì non crescono alberi né erba. */
+export const riverDist = (x: number, z: number): number => (RIVER ? along(RIVER.line, x, z).d - RIVER.hw : Infinity);
 
 // i tracciati ondeggiano un po' fra i punti di controllo, per non sembrare tirati col righello
 // (non vicino alla città: la strada deve infilare la porta)
@@ -124,9 +140,43 @@ function edge(x: number, z: number): number {
 export const LIFT = { w: WORLD + EAST + 1, h: WORLD + 1, d: new Int16Array((WORLD + EAST + 1) * (WORLD + 1)) };
 /** Legge le modifiche al terreno, se ci sono. Va chiamata prima di generare il mondo. */
 export async function loadLift(): Promise<void> {
-  const r = await fetch(`${import.meta.env.BASE_URL}data/terreno.bin`, { cache: "no-cache" }).catch(() => null);
-  const b = r?.ok ? await r.arrayBuffer() : null;
+  const get = (f: string): Promise<ArrayBuffer | null> => fetch(`${import.meta.env.BASE_URL}data/${f}`, { cache: "no-cache" }).then((r) => r.ok ? r.arrayBuffer() : null).catch(() => null);
+  const [b, rel] = await Promise.all([get("terreno.bin"), get("rilievo.bin")]);
   if (b?.byteLength === LIFT.d.byteLength) LIFT.d.set(new Int16Array(b));   // (una misura diversa è la pagina del server, non il file)
+  if (rel && rel.byteLength > 16) {
+    const [x0, z0, w, h] = new Float32Array(rel, 0, 4);
+    if (rel.byteLength === 16 + w * h * 3) Object.assign(RELIEF, { x0, z0, w, h, d: new Int16Array(rel, 16, w * h), k: new Uint8Array(rel, 16 + w * h * 2, w * h) });
+  }
+}
+
+/**
+ * Il rilievo della città (`public/data/rilievo.bin`, fatto con Blender: tools/blender/citta.py): la quota del suolo, assoluta,
+ * su una griglia da un metro che copre il rettangolo delle mura e i 30 m attorno. Intestazione: quattro Float32 (x0, z0 del primo
+ * punto, punti per riga, righe), poi Int16 in centimetri, una riga per ogni z, poi un Uint8 per punto: quanto il rilievo vale
+ * rispetto al terreno generato (255 dentro le mura e lungo il fiume, poi sfuma). Senza il file la città è il piano a `TOWN.y`.
+ */
+const RELIEF = { x0: 0, z0: 0, w: 0, h: 0, d: null as Int16Array | null, k: null as Uint8Array | null };
+/** Fra i quattro punti della griglia attorno a (x, z): la media pesata di `a`. */
+function cell(x: number, z: number, a: Int16Array | Uint8Array): number {
+  const { x0, z0, w, h } = RELIEF;
+  const fx = Math.min(Math.max(x - x0, 0), w - 1.001), fz = Math.min(Math.max(z - z0, 0), h - 1.001);
+  const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j, k = j * w + i;
+  return (a[k] * (1 - u) + a[k + 1] * u) * (1 - v) + (a[k + w] * (1 - u) + a[k + w + 1] * u) * v;
+}
+/** Il rilievo della città in metri, col suo rettangolo nel mondo [x0, z0, larghezza, profondità] (null senza il file). */
+export function reliefGrid(): { y: Float32Array; w: number; h: number; rect: [number, number, number, number] } | null {
+  const { x0, z0, w, h, d } = RELIEF;
+  return d ? { y: Float32Array.from(d, (v) => v / 100), w, h, rect: [x0, z0, w - 1, h - 1] } : null;
+}
+/** La quota del suolo della città in (x, z) del mondo: dal rilievo, o il piano `TOWN.y`. */
+export function townGround(x: number, z: number): number {
+  return RELIEF.d ? cell(x, z, RELIEF.d) / 100 : TOWN.y;
+}
+/** Quanto il suolo della città conta in (x, z), da 0 a 1: col rilievo lo dice il file, senza è il piano con 22 m di raccordo. */
+function townWeight(x: number, z: number, td: number): number {
+  const { x0, z0, w, h, k } = RELIEF;
+  if (!k) return 1 - smoothstep(0, 22, td);
+  return x < x0 || z < z0 || x > x0 + w - 1 || z > z0 + h - 1 ? 0 : cell(x, z, k) / 255;
 }
 /** Di quanto il terreno è stato alzato a mano in (x, z), in metri (fra i quattro vertici attorno). */
 export function lift(x: number, z: number): number {
@@ -154,11 +204,11 @@ export function baseHeight(x: number, z: number): number {
   // strada: parte come il sentiero, poi si allarga in una gola che taglia il crinale e scende alla quota della città
   for (const road of ROADS) {
     const r = along(road, wx, wz), g = smoothstep(0.1, 0.45, r.t);
-    const level = track + (TOWN.y - track) * smoothstep(0.2, 0.8, r.t);
+    const level = track + (townGround(GATE.x, GATE.z) - track) * smoothstep(0.2, 0.8, r.t);   // (alla quota della porta)
     h += (level - h) * (1 - smoothstep(1.5 + 4.5 * g, 5 + 27 * g, r.d)) * (0.8 + 0.2 * g);
   }
   // il piano della città
-  h += (TOWN.y - h) * (1 - smoothstep(0, 22, td));
+  h += (townGround(x, z) - h) * townWeight(x, z, td);   // (il rilievo della città, o il suo piano)
   return h;
 }
 

@@ -1,4 +1,4 @@
-import { Color3, DirectionalLight, RawTexture, Scene, ShadowGenerator, Texture, Vector3, type AbstractMesh, type Effect } from "@babylonjs/core";
+import { Color3, Constants, DirectionalLight, RawTexture, Scene, ShadowGenerator, Texture, Vector3, type AbstractMesh, type Effect } from "@babylonjs/core";
 import { CustomMaterial, PBRCustomMaterial } from "@babylonjs/materials";
 import { CLOUD_FUNCS, CloudField } from "../sky/Clouds";
 import type { TexPair } from "./textures";
@@ -113,8 +113,11 @@ float sqMn(vec3 x) {
 // (r, g: il verso orizzontale medio verso le lanterne). I materiali la leggono con la posizione nel mondo e la
 // sommano alla luce diffusa: selciato, muri, botti, abitanti e mani di chi gioca prendono la pozza calda, chi volta
 // le spalle alla lanterna no. Costa una lettura di texture per pixel, e nulla quando è spenta (di giorno).
-// ponytail: niente ombre portate (la luce passa i muri: con 6,5 m di raggio non si nota) e una sola quota per tutte
-// le fiamme; se servono ombre vere, si cuoce un'occlusione per lanterna nella stessa texture.
+// La quota delle fiamme che illuminano un texel sta nell'alfa (sopra la più bassa, fino a `LAMP_SPAN` metri): la città
+// ha colline, e una lanterna sul promontorio sta 30 m sopra una della piazza.
+// ponytail: niente ombre portate (la luce passa i muri: con 6,5 m di raggio non si nota); se servono ombre vere, si
+// cuoce un'occlusione per lanterna nella stessa texture.
+const LAMP_SPAN = 64;
 const LAMP = { n: 256, reach: 6.5, tex: null as RawTexture | null, rect: [0, 0, 1, 1], y: 0, glow: 0, on: true, color: new Color3(1.2, 0.62, 0.24) };
 
 function lampTex(scene: Scene): RawTexture {
@@ -127,7 +130,8 @@ function lampTex(scene: Scene): RawTexture {
 
 /** Cuoce la luce delle lanterne (posizioni nel mondo) sul rettangolo [x0, z0, larghezza, profondità], che deve contenerle con `reach` metri di margine. */
 export function bakeLamps(scene: Scene, lamps: { x: number; y: number; z: number; k?: number; r?: number }[], rect: [number, number, number, number]): void {
-  const n = LAMP.n, sum = new Float32Array(n * n * 3), data = new Uint8Array(n * n * 4);
+  const n = LAMP.n, sum = new Float32Array(n * n * 3), high = new Float32Array(n * n), data = new Uint8Array(n * n * 4);
+  const low = Math.min(...lamps.map((l) => l.y));
   for (const l of lamps) {
     const R = l.r ?? LAMP.reach, K = l.k ?? 1;   // (una finestra accesa o un uscio aperto: più debole e più corta di una lanterna)
     const i0 = Math.max(0, Math.floor((l.x - R - rect[0]) / rect[2] * n)), i1 = Math.min(n - 1, Math.ceil((l.x + R - rect[0]) / rect[2] * n));
@@ -136,19 +140,18 @@ export function bakeLamps(scene: Scene, lamps: { x: number; y: number; z: number
       const dx = l.x - (rect[0] + (i + 0.5) / n * rect[2]), dz = l.z - (rect[1] + (j + 0.5) / n * rect[3]), d = Math.hypot(dx, dz);
       if (d >= R) continue;
       const c = K * (1 - (d / R) ** 2) ** 2, k = (j * n + i) * 3, u = c / Math.max(d, 0.35);   // proprio sotto la lanterna la luce viene dall'alto: nessun verso
-      sum[k] += c; sum[k + 1] += dx * u; sum[k + 2] += dz * u;
+      sum[k] += c; sum[k + 1] += dx * u; sum[k + 2] += dz * u; high[k / 3] += c * l.y;
     }
   }
   for (let k = 0; k < n * n; k++) {
     const c = sum[k * 3];
     if (c <= 0) continue;
     data[k * 4] = 127.5 + 127.5 * sum[k * 3 + 1] / c; data[k * 4 + 1] = 127.5 + 127.5 * sum[k * 3 + 2] / c;
-    data[k * 4 + 2] = 255 * Math.sqrt(Math.min(1, c)); data[k * 4 + 3] = 255;
+    data[k * 4 + 2] = 255 * Math.sqrt(Math.min(1, c)); data[k * 4 + 3] = 255 * Math.min(1, Math.max(0, (high[k] / c - low) / LAMP_SPAN));
   }
   lampTex(scene).update(data);
   LAMP.rect = rect;
-  const posts = lamps.filter((l) => l.k === undefined);   // la quota è quella delle lanterne
-  LAMP.y = posts.reduce((a, l) => a + l.y, 0) / Math.max(1, posts.length);
+  LAMP.y = Number.isFinite(low) ? low : 0;   // (la quota più bassa: l'alfa di ogni texel dice quanto più in alto)
 }
 
 /** Quanto sono accese le lanterne (0..1: lo decide l'ora) e se la loro luce si disegna (impostazioni grafiche). */
@@ -318,7 +321,7 @@ export function lampLit(m: PBRCustomMaterial, indoor?: { warm: Color3; cold: Col
     }
     if (sqLamp.r > 0.0) {
       vec4 sqL = texture2D(sqLampMap, (vPositionW.xz - sqLampRect.xy) / sqLampRect.zw);
-      float sqUp = sqLamp.a - vPositionW.y;
+      float sqUp = sqLamp.a + sqL.a * ${LAMP_SPAN.toFixed(1)} - vPositionW.y;
       // da dove viene: il verso orizzontale dal campo, per la distanza stimata da quanta luce arriva; la quota dalla fiamma
       vec2 sqH = (sqL.rg * 2.0 - 1.0) * ${LAMP.reach.toFixed(1)} * sqrt(max(0.0, 1.0 - sqL.b));
       float sqN = max(dot(normalW, normalize(vec3(sqH.x, max(sqUp, 0.3), sqH.y))), 0.0);
@@ -419,6 +422,19 @@ float sq_n3(vec3 x) {
 }
 
 /** Corteccia, legno, pelle: PBR classico con albedo + normal map. */
+/**
+ * Il suolo sotto il muschio: la quota del terreno della città in una texture (un float per metro), letta con la posizione
+ * nel mondo. Così il muschio sta al piede dei muri anche su una collina. Senza rilievo, un texel solo alla quota del piano.
+ */
+const MOSS = { tex: null as RawTexture | null, rect: [-1e5, -1e5, 2e5, 2e5] as number[] };
+export function setMossGround(scene: Scene, ground: { y: Float32Array; w: number; h: number; rect: [number, number, number, number] } | null, flat: number): void {
+  MOSS.tex?.dispose();
+  const g = ground ?? { y: new Float32Array([flat]), w: 1, h: 1, rect: [-1e5, -1e5, 2e5, 2e5] as [number, number, number, number] };
+  MOSS.tex = RawTexture.CreateRTexture(g.y, g.w, g.h, scene, false, false, Texture.BILINEAR_SAMPLINGMODE, Constants.TEXTURETYPE_FLOAT);
+  MOSS.tex.wrapU = MOSS.tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+  MOSS.rect = g.rect;
+}
+
 export function surfaceMaterial(scene: Scene, name: string, t: TexPair, opts: { tint?: Color3; rough?: number; uv?: [number, number]; /** Profondità del rilievo (parallasse), in unità di uv: 0 = niente. */ relief?: number; indoor?: { warm: Color3; cold: Color3; ambient: Color3 }; /** Muschio: `y` = la quota del suolo, `k` = quanto (0..1). */ moss?: { y: number; k: number } } = {}): PBRCustomMaterial {
   const m = new PBRCustomMaterial(name, scene);
   m.albedoTexture = t.albedo;
@@ -438,8 +454,12 @@ export function surfaceMaterial(scene: Scene, name: string, t: TexPair, opts: { 
   if (opts.uv) for (const tx of [t.albedo, t.normal]) { (tx as Texture).uScale = opts.uv[0]; (tx as Texture).vScale = opts.uv[1]; }
   if (opts.moss) {
     m.Fragment_Definitions(MOSS_GLSL);
+    // (la quota del suolo: dal rilievo della città, `setMossGround`, se c'è; altrimenti quella data)
+    m.AddUniform("sqMossG", "sampler2D", MOSS.tex ?? undefined); m.AddUniform("sqMossR", "vec4", undefined);
+    const attach = m.AttachAfterBind.bind(m);
+    m.AttachAfterBind = (mesh, effect) => { attach(mesh, effect); if (MOSS.tex) effect.setTexture("sqMossG", MOSS.tex); effect.setFloat4("sqMossR", MOSS.rect[0], MOSS.rect[1], MOSS.rect[2], MOSS.rect[3]); };
     m.Fragment_Custom_Albedo(`
-      float sqMy = vPositionW.y - ${opts.moss.y.toFixed(2)};
+      float sqMy = vPositionW.y - ${MOSS.tex ? "texture2D(sqMossG, (vPositionW.xz - sqMossR.xy) / sqMossR.zw).r" : opts.moss.y.toFixed(2)};
       float sqMm = sqMn(vPositionW * 0.9) * 0.6 + sqMn(vPositionW * 3.1) * 0.4;
       float sqMk = smoothstep(0.56, 0.74, sqMm + (1.0 - smoothstep(0.0, 2.4, sqMy)) * 0.34 + clamp(normalize(vNormalW).y, 0.0, 1.0) * 0.14 - 0.08);
       surfaceAlbedo = mix(surfaceAlbedo, vec3(0.05, 0.085, 0.03) * (0.65 + 0.7 * sqMn(vPositionW * 9.0)), sqMk * ${opts.moss.k.toFixed(2)});

@@ -17,3 +17,4 @@ Ogni file è una decisione nel formato ADR (contesto, decisione, conseguenze, al
 | 0011 | [Stile a pixel e cel shading come strati sopra la stessa scena](0011-stili-di-resa-opzionali.md) | 2026-11-13 | accettata |
 | 0012 | [Abitanti a pelle unica generati dal codice, con teste scolpite](0012-abitanti-procedurali.md) | 2026-11-13 | accettata |
 | 0013 | [Un editor della mappa dentro il gioco, che scrive il file](0013-editor-della-mappa.md) | 2026-11-13 | accettata |
+| 0014 | [La città sul meandro: rilievo da Blender, pianta generata, nomi conservati](0014-citta-sul-meandro.md) | 2026-11-13 | accettata |

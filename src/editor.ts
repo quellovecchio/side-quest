@@ -2,8 +2,8 @@ import {
   Color3, GizmoManager, Mesh, MeshBuilder, PointerEventTypes, Quaternion, StandardMaterial, TransformNode, Vector3,
   type AbstractMesh, type FreeCamera, type RenderTargetTexture, type Scene,
 } from "@babylonjs/core";
-import { INTERIORS, PREFABS, SPANS, type PrefabId } from "./data/db";
-import { TOWN } from "./world/terrain";
+import { INTERIORS, LINED, PREFABS, SPANS, type PrefabId } from "./data/db";
+import { TOWN, townGround } from "./world/terrain";
 import type { Town } from "./world/town";
 import { propCopies } from "./world/props";
 import type { ChildDef } from "./data/db";
@@ -28,7 +28,7 @@ type Tool = (typeof TOOLS)[number];
 
 type V3 = [number, number, number];
 /** Un elemento del file com'è scritto (i campi sono quelli di `ChildDef`, ma gli oggetti tesi non hanno `at`). */
-interface Raw { id?: string; prefab: PrefabId; at?: [number, number]; yaw?: number; size?: [number, number]; scale?: number; tint?: string; interior?: string; seed?: number; variant?: number; from?: V3; to?: V3 }
+interface Raw { id?: string; prefab: PrefabId; at?: [number, number]; yaw?: number; size?: [number, number]; scale?: number; tint?: string; interior?: string; seed?: number; variant?: number; from?: V3; to?: V3; line?: V3[] }
 interface Item { uid: number; raw: Raw }
 /** Ciò che si vede di un elemento: le sue mesh appese a un perno. `at0`/`yaw0` = dove stava quando le mesh sono state fatte. */
 interface Part { meshes: AbstractMesh[]; pivot: TransformNode; at0: [number, number]; yaw0: number; sig: string; ghost: boolean; own: boolean;
@@ -39,6 +39,7 @@ const KEY = "sidequest.editor", rad = (d: number): number => d * Math.PI / 180, 
 const isSpan = (r: Raw): boolean => SPANS.includes(r.prefab);
 /** Centro e verso di un elemento: per i tesi dai due capi (come li ricava il lettore del file, db.ts). */
 function placeOf(r: Raw): { at: [number, number]; yaw: number } {
+  if (r.line) { const m = r.line[Math.floor((r.line.length - 1) / 2)]; return { at: [m[0], m[2]], yaw: 0 }; }   // (scale e ponti: come li mette il lettore del file)
   if (!isSpan(r)) return { at: r.at!, yaw: r.yaw ?? 0 };
   const [a, b] = [r.from!, r.to!];
   return { at: [(a[0] + b[0]) / 2, (a[2] + b[2]) / 2], yaw: deg(Math.atan2(-(b[2] - a[2]), b[0] - a[0])) };
@@ -49,7 +50,7 @@ const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 /** Ciò che cambia la forma (non la posizione): se è diverso da com'era al caricamento, si vedrà salvando. */
 /** Ciò che obbliga a ricostruire un teso. */
 const sigOf = (r: Raw): string => JSON.stringify([r.prefab, r.from, r.to]);
-const shapeOf = (r: Raw): string => JSON.stringify([r.prefab, r.size, r.scale, r.tint, r.interior, r.seed, r.variant]);
+const shapeOf = (r: Raw): string => JSON.stringify([r.prefab, r.size, r.scale, r.tint, r.interior, r.seed, r.variant, r.line]);
 
 export interface EditorCtx { scene: Scene; cam: FreeCamera; town: Town; locationId: string; ground: (x: number, z: number) => number; shadowMap: RenderTargetTexture; pickables: AbstractMesh[]; terrain: AbstractMesh;
   /** Le copie da modello (botti, casse, merce), una mesh ciascuna, segnate con l'elemento che le ha volute (`metadata.owner`). */
@@ -162,7 +163,8 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
       } else if (!part || part.shape !== shapeOf(it.raw)) part = rebuild(it, part);   // (nuovo, o cambiato di forma: si costruisce subito)
       const p = placeOf(it.raw);
       part.pivot.setEnabled(true);
-      part.pivot.position.set(TOWN.x + p.at[0], TOWN.y, TOWN.z + p.at[1]);
+      // (su una città in collina l'elemento spostato sale o scende col suolo: le sue mesh sono fatte alla quota di `at0`)
+      part.pivot.position.set(TOWN.x + p.at[0], TOWN.y + townGround(TOWN.x + p.at[0], TOWN.z + p.at[1]) - townGround(TOWN.x + part.at0[0], TOWN.z + part.at0[1]), TOWN.z + p.at[1]);
       part.pivot.rotationQuaternion = Quaternion.RotationYawPitchRoll(rad(p.yaw - part.yaw0), 0, 0);
     }
     ctx.shadowMap.resetRefreshCounter();
@@ -200,6 +202,9 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
         return [r3(x + ox), c[1], r3(z + oz)];
       };
       it.raw.from = move(it.raw.from!); it.raw.to = move(it.raw.to!);
+    } else if (it.raw.line) {   // una scala si sposta (e gira) con tutta la sua mezzeria, e si ricostruisce
+      const old = placeOf(it.raw);
+      it.raw.line = it.raw.line.map(([px, q, pz]): V3 => { const [ox, oz] = turn(px - old.at[0], pz - old.at[1], dy); return [r3(x + ox), q, r3(z + oz)]; });
     } else { it.raw.at = [x, z]; it.raw.yaw = r3(((part.yaw0 + deg(dy)) % 360 + 540) % 360 - 180); }
     commit(); sync();
   };
@@ -208,21 +213,25 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
   const outline = (uid: number | null, on: boolean): void => { const p = uid !== null ? P.get(uid) : undefined; for (const m of p?.meshes ?? []) if (!m.metadata?.interior) m.showBoundingBox = on; };
   const select = (uid: number | null): void => { outline(sel, false); sel = uid; outline(sel, true); attach(); showHandles(); panel(); };
 
-  // ── i capi dei tesi: maniglie che si agganciano alla superficie sotto il puntatore ──
-  const handles = [0, 1].map((i) => {
-    const h = MeshBuilder.CreateSphere(`editor_capo${i}`, { diameter: 0.35, segments: 8 }, scene);
+  // ── i punti: i capi dei tesi (festoni, panni) e i punti di scale e ponti. Maniglie che si agganciano alla superficie sotto
+  // il puntatore; la quota si scrive dal suolo sotto il punto (come la legge il gioco). Shift+clic su una maniglia di una
+  // scala o di un ponte aggiunge un punto dopo di lei, Alt+clic la toglie. ──
+  const handles: Mesh[] = [];
+  const handle = (i: number): Mesh => handles[i] ??= (() => {
+    const h = MeshBuilder.CreateSphere(`editor_capo${i}`, { diameter: 0.45, segments: 8 }, scene);
     h.material = handleMat; h.renderingGroupId = 2; h.isPickable = true; h.metadata = { handle: i }; h.setEnabled(false);
     return h;
-  });
+  })();
+  /** I punti di un elemento che si tirano con le maniglie (o null). */
+  const pointsOf = (r: Raw): V3[] | null => (isSpan(r) ? [r.from!, r.to!] : r.line ?? null);
+  /** Dove sta nel mondo un punto [x, quota dal suolo, z] della città. */
+  const worldOf = (c: V3): Vector3 => new Vector3(TOWN.x + c[0], townGround(TOWN.x + c[0], TOWN.z + c[2]) + c[1], TOWN.z + c[2]);
   function showHandles(): void {
-    const it = items.find((i) => i.uid === sel);
-    const on = !!it && isSpan(it.raw);
-    handles.forEach((h, i) => {
-      h.setEnabled(on);
-      if (on) { const c = i ? it!.raw.to! : it!.raw.from!; h.position.set(TOWN.x + c[0], TOWN.y + c[1], TOWN.z + c[2]); }
-    });
+    const it = items.find((i) => i.uid === sel), pts = it ? pointsOf(it.raw) : null;
+    handles.forEach((h) => h.setEnabled(false));
+    pts?.forEach((c, i) => { const h = handle(i); h.setEnabled(true); h.position.copyFrom(worldOf(c)); });
   }
-  let dragging = -1;
+  let dragging = -1, built = "";
 
   // ── il puntatore ──
   const pickable = (m: AbstractMesh): boolean => m.isPickable && m.isEnabled() && m.isVisible && m.metadata?.handle === undefined;
@@ -259,21 +268,39 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
     const e = pi.event as PointerEvent;
     if (pi.type === PointerEventTypes.POINTERDOWN && e.button === 0) {
       const h = scene.pick(scene.pointerX, scene.pointerY, (m) => m.metadata?.handle !== undefined && m.isEnabled());
-      if (h?.hit) { dragging = h.pickedMesh!.metadata.handle; return; }
+      if (h?.hit) {
+        const i: number = h.pickedMesh!.metadata.handle, it = items.find((q) => q.uid === sel)!, l = it.raw.line;
+        if (l && e.altKey) { if (l.length > 2) { l.splice(i, 1); commit(); sync(); } return; }   // toglie il punto
+        if (l && e.shiftKey) {   // un punto nuovo subito dopo, a metà strada verso il seguente (o oltre l'ultimo), e lo si tira
+          const a = l[i], b = l[i + 1] ?? [a[0] + (a[0] - l[i - 1][0]) * 0.5, a[1], a[2] + (a[2] - l[i - 1][2]) * 0.5];
+          l.splice(i + 1, 0, [r3((a[0] + b[0]) / 2), r3((a[1] + b[1]) / 2), r3((a[2] + b[2]) / 2)]);
+          commit(); sync(); dragging = i + 1; return;
+        }
+        dragging = i; built = JSON.stringify(pointsOf(it.raw)); return;
+      }
     }
     if (pi.type === PointerEventTypes.POINTERMOVE && dragging >= 0) {
       const it = items.find((i) => i.uid === sel)!, own = P.get(sel!)?.meshes ?? [];
       const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => pickable(m) && !own.includes(m));
       if (hit?.hit && hit.pickedPoint) {
-        const n = hit.getNormal(true) ?? Vector3.Up(), p = hit.pickedPoint.add(n.scale(0.05));
-        const c: V3 = [r3(p.x - TOWN.x), r3(p.y - TOWN.y), r3(p.z - TOWN.z)];
-        if (dragging) it.raw.to = c; else it.raw.from = c;
-        const [a, b] = [it.raw.from!, it.raw.to!];
-        if (Math.hypot(b[0] - a[0], b[2] - a[2]) >= 0.5) sync();
+        // i capi dei tesi stanno 5 cm fuori dalla superficie (un muro); i punti di scale e ponti ci poggiano sopra
+        const span = isSpan(it.raw), n = hit.getNormal(true) ?? Vector3.Up(), p = span ? hit.pickedPoint.add(n.scale(0.05)) : hit.pickedPoint;
+        let q = r3(p.y - townGround(p.x, p.z));
+        const l = it.raw.line;
+        if (!span && Math.abs(q) < 0.1) q = 0;
+        if (l && it.raw.prefab.startsWith("ponte") && dragging > 0 && dragging < l.length - 1) q = 0;   // (il mezzo di un ponte va da un capo all'altro)
+        const c: V3 = [r3(p.x - TOWN.x), q, r3(p.z - TOWN.z)];
+        if (l) l[dragging] = c; else if (dragging) it.raw.to = c; else it.raw.from = c;
+        const pts = pointsOf(it.raw)!, prev = JSON.parse(built || "null") as V3[] | null;
+        handle(dragging).position.copyFrom(worldOf(c));
+        // si ricostruisce quando il punto si è mosso di 30 cm dall'ultima volta (una scala ha molte facce)
+        const moved = !prev || prev.length !== pts.length || pts.some((v, k) => Math.hypot(v[0] - prev[k][0], v[1] - prev[k][1], v[2] - prev[k][2]) > 0.3);
+        const long = pts.slice(1).every((v, k) => Math.hypot(v[0] - pts[k][0], v[2] - pts[k][2]) >= 0.5);
+        if (moved && long) { built = JSON.stringify(pts); sync(); }
       }
       return;
     }
-    if (pi.type === PointerEventTypes.POINTERUP && dragging >= 0) { dragging = -1; commit(); return; }
+    if (pi.type === PointerEventTypes.POINTERUP && dragging >= 0) { dragging = -1; built = ""; commit(); sync(); return; }
     if (pi.type === PointerEventTypes.POINTERTAP && e.button === 0) {
       const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => pickable(m) && m.metadata?.edit !== undefined);
       select(hit?.hit ? hit.pickedMesh!.metadata.edit : null);
@@ -322,7 +349,10 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
   };
   const add = (prefab: PrefabId): void => {
     const [x, z] = aim(), variant = Math.floor(Math.random() * 1e6), raw: Raw = { prefab };
-    if (SPANS.includes(prefab)) {
+    if (LINED.includes(prefab)) {   // una scala o un ponte: una mezzeria di due punti, lungo lo sguardo
+      const [dx, dz] = [Math.sin(yaw), Math.cos(yaw)];
+      raw.line = [[r3(x - dx * 6), 0, r3(z - dz * 6)], [r3(x + dx * 6), 0, r3(z + dz * 6)]];
+    } else if (SPANS.includes(prefab)) {
       const [dx, dz] = [Math.cos(yaw), -Math.sin(yaw)], h = prefab === "festone" ? 5.3 : 3.3;
       raw.from = [r3(x - dx * 3), h, r3(z - dz * 3)]; raw.to = [r3(x + dx * 3), h, r3(z + dz * 3)];
     } else { raw.at = [x, z]; raw.yaw = 0; if (prefab.startsWith("casa.") || prefab === "cassa") raw.size = prefab === "cassa" ? [0.8, 0.8] : [6.4, 7]; }
@@ -397,13 +427,23 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
       const r = it.raw;
       box.append(field("tipo", choice(PREFABS, r.prefab, (v) => {
         r.prefab = v as PrefabId;
+        if (LINED.includes(r.prefab) && !r.line) { const p = placeOf(r); r.line = [[p.at[0] - 6, 0, p.at[1]], [p.at[0] + 6, 0, p.at[1]]]; delete r.at; delete r.yaw; delete r.from; delete r.to; if (!r.prefab.startsWith("scala")) delete r.size; }
+        else if (!LINED.includes(r.prefab) && r.line) { r.at = placeOf(r).at; r.yaw = 0; delete r.line; }
         if (isSpan(r) && !r.from) { const p = placeOf({ ...r, prefab: "pozzo" }); r.from = [p.at[0] - 3, 4, p.at[1]]; r.to = [p.at[0] + 3, 4, p.at[1]]; delete r.at; delete r.yaw; delete r.size; }
         else if (!isSpan(r) && !r.at) { const p = placeOf({ ...r, prefab: "festone" }); r.at = p.at; r.yaw = 0; delete r.from; delete r.to; }
       })));
       const id = document.createElement("input"); id.value = r.id ?? ""; id.placeholder = "(nessuno)";
       id.onchange = () => { if (id.value) r.id = id.value; else delete r.id; commit(); sync(); };
       box.append(field("nome (id)", id));
-      if (isSpan(r)) {
+      if (r.line) {   // scale e ponti: i punti della mezzeria (a ogni punto di mezzo un pianerottolo o una svolta)
+        r.line.forEach((q, k) => { for (const [j, ax] of ["x", "quota", "z"].entries()) box.append(field(`punto ${k + 1} ${ax}`, num(q[j], 0.25, (n) => { q[j] = n; }))); });
+        const pr = box.appendChild(document.createElement("div")); pr.className = "row";
+        const more = pr.appendChild(document.createElement("button")); more.textContent = "+ punto";
+        more.onclick = () => { const l = r.line!, [a, b] = [l[l.length - 2], l[l.length - 1]]; l.push([r3(b[0] + (b[0] - a[0]) * 0.5), b[1], r3(b[2] + (b[2] - a[2]) * 0.5)]); commit(); sync(); };
+        const less = pr.appendChild(document.createElement("button")); less.textContent = "− punto";
+        less.onclick = () => { if (r.line!.length > 2) { r.line!.pop(); commit(); sync(); } };
+        if (r.prefab.startsWith("scala")) box.append(field("larghezza", num(r.size?.[0] ?? 4.4, 0.25, (n) => { r.size = [n, 0]; })));
+      } else if (isSpan(r)) {
         for (const [k, name] of [["from", "da"], ["to", "a"]] as const) for (const [j, ax] of ["x", "quota", "z"].entries())
           box.append(field(`${name} ${ax}`, num(r[k]![j], 0.25, (n) => { r[k]![j] = n; })));
       } else {
@@ -439,7 +479,7 @@ export async function startEditor(ctx: EditorCtx): Promise<{ update(dt: number):
     if (dirty && undo.length) box.append(Object.assign(document.createElement("div"), { className: "note", textContent: `Modifiche non salvate (${undo.length}).` }));
     if (message) box.append(Object.assign(document.createElement("div"), { className: message.startsWith("✗") ? "err" : "note", textContent: message }));
     box.append(Object.assign(document.createElement("div"), { className: "hint", textContent: "Si aggiornano salvando: interni, luci e lanterne, porte, terreno (strade e verde), la rete degli abitanti nel gioco." }));
-    box.append(Object.assign(document.createElement("div"), { className: "hint", innerHTML: "Tasto destro + mouse: guarda · WASD: muovi · R/F: su/giù · Shift: veloce · rotella: velocità<br>Clic: scegli · 1 sposta · 2 ruota · Ctrl+D duplica · Canc elimina · Ctrl+Z/Y · Ctrl+S salva<br>Festoni e panni: trascina un capo sopra un muro per agganciarlo." }));
+    box.append(Object.assign(document.createElement("div"), { className: "hint", innerHTML: "Tasto destro + mouse: guarda · WASD: muovi · R/F: su/giù · Shift: veloce · rotella: velocità<br>Clic: scegli · 1 sposta · 2 ruota · Ctrl+D duplica · Canc elimina · Ctrl+Z/Y · Ctrl+S salva<br>Festoni, panni, scale e ponti: trascina un punto (le sfere) sopra un muro o il terreno per agganciarlo; scale e ponti: Shift+clic su un punto ne aggiunge uno dopo, Alt+clic lo toglie." }));
   }
 
   // ── salvare e uscire ──

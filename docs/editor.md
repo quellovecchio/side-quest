@@ -22,13 +22,14 @@ ricostruisce dal file.
 ## Oggetti tesi fra due punti
 
 Festoni, panni stesi e in generale tutto ciò che va da una parte all'altra non hanno posizione, rotazione e misura: hanno
-**due capi**.
+**due capi**. Scale e ponti funzionano allo stesso modo, ma con due punti o più (`line`, una lista di [x, quota, z]): a ogni
+punto di mezzo un pianerottolo (la scala) o una svolta (il ponte), quindi anche i tornanti.
 
 ```json
 { "prefab": "festone", "from": [-49.7, 5.3, 0], "to": [-40.3, 5.3, 0], "variant": 1234 }
 ```
 
-- `from` e `to` sono [x, quota, z] nelle coordinate della città (la quota dal suolo della città).
+- `from` e `to` sono [x, quota, z] nelle coordinate della città (la quota dal suolo sotto quel capo).
 - Il contenuto **si popola da sé in base alla lunghezza**: un festone mette una bandierina ogni 55 cm, i panni riempiono
   la corda finché c'è posto. La corda ha una pancia che cresce con la lunghezza.
 - I due capi possono stare a quote diverse (da un balcone a una finestra).
@@ -36,7 +37,9 @@ Festoni, panni stesi e in generale tutto ciò che va da una parte all'altra non 
 - Oggi sono tesi: `festone`, `panni`. Un nuovo tipo teso si aggiunge all'elenco `SPANS` (`db.ts`) e alla funzione
   `span()` (`town.ts`).
 
-**Nell'editor** un oggetto teso selezionato mostra i suoi due capi come maniglie. Trascinando una maniglia il capo si
+**Nell'editor** un oggetto teso, una scala o un ponte selezionati mostrano i loro punti come maniglie. Per scale e ponti
+Shift+clic su una maniglia aggiunge un punto subito dopo, Alt+clic la toglie. La quota di ogni punto si scrive dal suolo che
+gli sta sotto (in collina: il rilievo della città). Trascinando una maniglia il capo si
 **aggancia alla superficie che sta sotto il puntatore** (un muro, un palo, un balcone, il terreno), con 5 cm di stacco.
 L'oggetto si ricostruisce mentre si trascina. Si può anche spostare tutto l'oggetto, come gli altri.
 
@@ -131,5 +134,6 @@ salvataggio: mentre si dipinge cambia la sola mesh del terreno.
 - I posti accanto ai lampioni (`lampione.N`) li mette il gioco: non compaiono fra i posti.
 - Spostando un lampione il giro di Lumier non si aggiorna (le tappe sono un elenco nel file).
 - Le finestre trasparenti e la rifrazione non funzionano in modalità editor.
-- Il terreno scolpito sotto la città sposta il suolo ma non gli edifici, che restano alla quota della città.
+- Il terreno scolpito sotto la città sposta il suolo ma non gli edifici: un edificio prende la quota del rilievo della città
+  (`rilievo.bin`) solo dove si posa, e uno spostato dall'editor la segue subito; lo strato scolpito a mano no.
 - Salvando gli abitanti la prima volta le righe della giornata cambiano spaziatura (`{ "from": … }`): i dati sono gli stessi.

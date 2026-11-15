@@ -36,7 +36,7 @@ export interface SpawnDef {
 export interface TimeDef { start: number; dayMinutes: number; wake: { name: string; hour: number }[] }
 
 /** I generatori che il file può richiamare: il codice sta in `world/town.ts` (uno per chiave, lo controlla il compilatore). */
-export const PREFABS = ["casa.povera", "casa.graticcio", "casa.ricca", "cattedrale", "municipio", "fucina", "pozzo", "fontana", "banco", "panchina", "panca.pietra", "lampione", "botte", "cassa", "carretto", "bacheca", "orto", "lapidi", "festone", "stendardo", "insegna", "panni"] as const;
+export const PREFABS = ["casa.povera", "casa.graticcio", "casa.ricca", "cattedrale", "municipio", "fucina", "pozzo", "fontana", "banco", "panchina", "panca.pietra", "lampione", "botte", "cassa", "carretto", "bacheca", "orto", "lapidi", "festone", "stendardo", "insegna", "panni", "ponte", "teatro", "ponte.botteghe", "scala", "scala.parapetto"] as const;
 export type PrefabId = typeof PREFABS[number];
 /** Quelli che hanno bisogno di una misura (`size`: larghezza e profondità in metri). */
 const SIZED: PrefabId[] = ["casa.povera", "casa.graticcio", "casa.ricca", "cassa"];
@@ -60,10 +60,18 @@ const FITS: Record<InteriorId, PrefabId | "gate"> = { locanda: "casa.ricca", "ca
 export interface ChildDef { id?: string; prefab: PrefabId; at: [number, number]; yaw: number; size?: [number, number]; /** Quanto è ingrandito l'edificio, altezze comprese (gli arredi dentro restano a misura d'uomo). */ scale: number; tint?: "vino" | "ocra" | "muschio"; interior?: InteriorId; seed?: number;
   /** Il seme delle piccole differenze a caso di questo elemento (inclinazioni, merci, numeri delle finestre): ognuno il suo, così aggiungerne o toglierne uno non cambia gli altri. */
   variant?: number;
+  /**
+   * Solo per scale e ponti (`LINED`): i punti, [x, quota, z] nelle coordinate dell'insediamento, la quota dal suolo sotto il
+   * punto (come i capi dei festoni). A ogni punto di mezzo un pianerottolo o una svolta; la larghezza di una scala è `size[0]`.
+   * Il lettore ne ricava `at`.
+   */
+  line?: [number, number, number][];
   /** Solo per gli oggetti tesi (`SPANS`): i due capi, [x, quota, z] nelle coordinate dell'insediamento. Il lettore ne ricava `at`, `yaw` e `size`. */
   from?: [number, number, number]; to?: [number, number, number] }
 /** Gli oggetti tesi fra due punti: non hanno posizione e misura ma due capi (`from`, `to`), e si popolano in base alla lunghezza (town.ts, `span`). */
 export const SPANS: PrefabId[] = ["festone", "panni"];
+/** Quelli che seguono una mezzeria (`line`: due punti o più): le scale e i ponti. */
+export const LINED: PrefabId[] = ["scala", "scala.parapetto", "ponte", "ponte.botteghe"];
 /** Un selciato: una striscia dritta lungo x o lungo z, larga `width`. */
 export interface PavingDef { kind: "lastre" | "lastre.diagonali" | "cubetti" | "ciottoli"; width: number; line: [number, number][] }
 /** Un posto con un nome, dove qualcuno si ferma: coordinate locali, `yaw` in gradi. */
@@ -86,7 +94,12 @@ export interface LocationDef {
   /** Selciati, tracciati su cui camminano gli abitanti (i punti sono i nodi; un punto ripetuto in due tracciati è un incrocio), cose posate, posti. */
   paving: PavingDef[]; walks: [number, number][][]; /** Le zone verdi dentro le mura: rettangoli fra due angoli, nel riferimento del luogo. */ green: [number, number][][]; children: ChildDef[]; spots: Record<string, SpotDef>;
   /** Solo per gli insediamenti: la porta della città (a ovest). Con `interior` si entra nella torre sud e si sale al corpo di guardia. */
-  gate?: { id: string; interior?: "porta"; seed?: number; scale: number };
+  /** La porta: `at` dove sta (senza: a metà del lato ovest del rettangolo), `yaw` verso dove guarda il fuori (gradi; senza: ovest, −90). */
+  gate?: { id: string; interior?: "porta"; seed?: number; scale: number; at?: [number, number]; yaw?: number };
+  /** Le mura come poligono chiuso nel riferimento del luogo (senza: il rettangolo di `ground.rect`); seguono il suolo. */
+  walls?: [number, number][];
+  /** Il fiume che attraversa il luogo: la mezzeria, la larghezza e la quota dell'acqua (assoluta). L'alveo è nel rilievo. */
+  river?: { line: [number, number][]; width: number; level: number };
 }
 
 /** Un tracciato nel mondo: `trail` è un sentiero; `road` una strada che scende a un insediamento (`to`) e arriva alla sua porta. */
@@ -360,9 +373,12 @@ export function parseDb(raw: unknown): Db {
         size: (n) => n.or(undefined, (s) => s.at()), tint: (n) => n.or(undefined, (s) => s.one("vino", "ocra", "muschio")), interior: (n) => n.or(undefined, (s) => s.one(...INTERIORS)),
         seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)),
         variant: (n) => n.or(undefined, (s) => s.num(0)), from: (n) => n.or(undefined, (s) => s.xyz()), to: (n) => n.or(undefined, (s) => s.xyz()),
+        line: (n) => n.or(undefined, (s) => s.list((p) => p.xyz())),
       }))),
       spots: (x) => x.or({}, (v) => v.map((s) => s.obj<SpotDef>({ at: (n) => n.at(), yaw: (n) => n.or(0, (a) => a.num(-360, 360.001)) }))),
-      gate: (x) => x.or<LocationDef["gate"]>(undefined, (g) => g.obj({ id: (n) => n.str(), interior: (n) => n.or(undefined, (s) => s.one("porta")), seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)) })),
+      gate: (x) => x.or<LocationDef["gate"]>(undefined, (g) => g.obj({ id: (n) => n.str(), interior: (n) => n.or(undefined, (s) => s.one("porta")), seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)), at: (n) => n.or(undefined, (s) => s.at()), yaw: (n) => n.or(undefined, (s) => s.num(-360, 360.001)) })),
+      walls: (x) => x.or(undefined, (v) => v.line()),
+      river: (x) => x.or<LocationDef["river"]>(undefined, (r) => r.obj({ line: (n) => n.line(), width: (n) => n.num(2, 60), level: (n) => n.num() })),
     })),
     roads: (r) => r.list((d) => d.obj<RoadDef>({ id: (x) => x.str(), kind: (x) => x.one("trail", "road"), line: (x) => x.line(), to: (x) => x.or(undefined, (s) => s.str()) })),
   });
@@ -389,9 +405,11 @@ export function parseDb(raw: unknown): Db {
     if (l.kind !== "settlement") return;
     if (!l.ground) throw new DbError(`${at}.ground: a un insediamento servono il rettangolo delle mura e la quota`);
     if (l.ground.rect.some((h) => h < 10)) throw new DbError(`${at}.ground.rect: mezzi lati da 10 m in su`);
+    if (l.walls && (l.walls.length < 3 || l.walls.some(([x, z]) => Math.abs(x) > l.ground!.rect[0] + 0.01 || Math.abs(z) > l.ground!.rect[1] + 0.01))) throw new DbError(`${at}.walls: un poligono di almeno tre punti, dentro il rettangolo di ground.rect`);
     l.paving.forEach((p, j) => {
       const [[ax, az], [bx, bz]] = p.line;
-      if (p.line.length !== 2 || (ax !== bx && az !== bz)) throw new DbError(`${at}.paving[${j}].line: un selciato è una striscia dritta, lungo x o lungo z (due punti)`);
+      // (due punti allineati: una striscia dritta, piatta; altrimenti un nastro lungo la spezzata, che segue il suolo)
+      if (p.line.length < 2 || (p.line.length === 2 && ax === bx && az === bz)) throw new DbError(`${at}.paving[${j}].line: un selciato va da un punto a un altro`);
     });
     const seen = new Set<string>(l.gate ? [l.gate.id] : []);
     if (l.gate?.id.includes(".")) throw new DbError(`${at}.gate.id: "${l.gate.id}" non può contenere un punto (i posti dentro si chiamano id.posto)`);
@@ -402,7 +420,14 @@ export function parseDb(raw: unknown): Db {
         const dx = c.to[0] - c.from[0], dz = c.to[2] - c.from[2], len = Math.hypot(dx, dz);
         if (len < 0.5 || len > 40) throw new DbError(`${at}.children[${j}]: fra i due capi ci vogliono da 0,5 a 40 m (sono ${len.toFixed(1)})`);
         c.at = [(c.from[0] + c.to[0]) / 2, (c.from[2] + c.to[2]) / 2]; c.yaw = Math.atan2(-dz, dx) * 180 / Math.PI; c.size = [len, 0];
-      } else if (!c.at || c.from || c.to) throw new DbError(`${at}.children[${j}]: a un "${c.prefab}" serve at [x, z] (from e to sono solo degli oggetti tesi: ${SPANS.join(", ")})`);
+      } else if (LINED.includes(c.prefab)) {   // scale e ponti seguono la loro mezzeria: il centro è a metà
+        if (!c.line || c.line.length < 2 || c.at || c.from || c.to) throw new DbError(`${at}.children[${j}]: un "${c.prefab}" segue una mezzeria: serve line [[x, quota, z], …] (almeno due punti), e niente at, from, to`);
+        const len = c.line.slice(1).reduce((a, p, k) => a + Math.hypot(p[0] - c.line![k][0], p[2] - c.line![k][2]), 0);
+        if (len < 2 || len > 160) throw new DbError(`${at}.children[${j}].line: lunga da 2 a 160 m (è ${len.toFixed(1)})`);
+        const m = c.line[Math.floor((c.line.length - 1) / 2)];
+        c.at = [m[0], m[2]]; c.yaw = 0; if (c.prefab.startsWith("scala")) c.size ??= [4.4, 0];
+      } else if (c.line) throw new DbError(`${at}.children[${j}].line: la mezzeria è solo di scale e ponti (${LINED.join(", ")})`);
+      else if (!c.at || c.from || c.to) throw new DbError(`${at}.children[${j}]: a un "${c.prefab}" serve at [x, z] (from e to sono solo degli oggetti tesi: ${SPANS.join(", ")})`);
       if (SIZED.includes(c.prefab) && !c.size) throw new DbError(`${at}.children[${j}].size: a "${c.prefab}" serve la misura [larghezza, profondità]`);
       if (c.interior && FITS[c.interior] !== c.prefab) throw new DbError(`${at}.children[${j}].interior: l'interno "${c.interior}" sta in ${FITS[c.interior] === "gate" ? "una porta della città (gate)" : `un "${FITS[c.interior]}"`}, non in un "${c.prefab}"`);
       if (c.interior && !c.id) throw new DbError(`${at}.children[${j}].id: a un edificio in cui si entra serve un nome (i posti dentro si chiamano id.posto)`);
