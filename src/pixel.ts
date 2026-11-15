@@ -1,4 +1,4 @@
-import { Effect, PostProcess, Texture, type Camera, type DefaultRenderingPipeline, type Engine, type Scene } from "@babylonjs/core";
+import { Constants, Effect, PostProcess, Texture, type Camera, type DefaultRenderingPipeline, type Engine, type Scene } from "@babylonjs/core";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STILE A PIXEL — il mondo resta quello (luci, ombre, vetri, foschia: tutto come prima), cambia come
@@ -11,6 +11,13 @@ import { Effect, PostProcess, Texture, type Camera, type DefaultRenderingPipelin
 //   3. texture a blocchi: ogni texture con le mipmap si legge da un livello piccolo (64 pixel di lato)
 //      e senza sfumare fra un texel e l'altro, così da vicino si vedono i quadretti.
 // Si spegne e torna tutto com'era: non tocca materiali né shader del gioco.
+// Seconda resa, "retrò" (`look` = "retro", come i giochi a pixel di oggi): colore pieno, effetti moderni.
+//   1. il mondo si disegna alla risoluzione di sempre e un PRIMO filtro (`sqBlocchi`, in testa a tutti) lo riduce a blocchi
+//      di `block` pixel facendo la media di ognuno (16 letture): pixel grossi ma lisci, che non sfarfallano camminando;
+//   2. bloom, occlusione, raggi di luce e viraggio vengono DOPO, a piena risoluzione: la luce resta morbida sopra i pixel;
+//   3. l'ultimo filtro (`sqRetro`) porta i colori a 24 gradini col retino per blocco (le sfumature restano, appena a scalini)
+//      e scosta un filo rosso e blu verso i bordi; le righe dello schermo sono un velo HTML sopra il canvas (gratis, nitide).
+// Costa quanto il gioco senza stile a pixel (il mondo si disegna intero) più due filtri leggeri.
 // ponytail: la tavolozza è una sola per tutte le ore (di notte usa i viola e gli ambra della stessa
 // lista); niente vertici agganciati alla griglia.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,9 +61,41 @@ void main(void) {
   gl_FragColor = vec4(sqB4(gl_FragCoord.xy) < (t - 0.3) * 2.2 ? b : a, 1.0);
 }`;
 
+Effect.ShadersStore.sqBlocchiFragmentShader = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D textureSampler;
+uniform vec2 sqScreen;
+uniform float sqBlock;
+void main(void) {
+  vec2 o = floor(vUV * sqScreen / sqBlock) * sqBlock;                 // l'angolo del blocco, in pixel
+  vec3 c = vec3(0.0);
+  for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+    vec2 p = min(o + (vec2(float(i), float(j)) + 0.5) * sqBlock * 0.25, sqScreen - 0.5);
+    c += texture2D(textureSampler, p / sqScreen).rgb;
+  }
+  gl_FragColor = vec4(c / 16.0, 1.0);
+}`;
+
+Effect.ShadersStore.sqRetroFragmentShader = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D textureSampler;
+uniform vec2 sqScreen;
+uniform float sqBlock;
+float sqB2(vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }
+float sqB4(vec2 a) { return sqB2(0.5 * a) * 0.25 + sqB2(a); }
+void main(void) {
+  vec2 d = vUV - 0.5;
+  vec2 off = d * dot(d, d) * 1.5 * sqBlock / sqScreen;                // rosso e blu scostati, solo verso i bordi
+  vec3 c = vec3(texture2D(textureSampler, vUV + off).r, texture2D(textureSampler, vUV).g, texture2D(textureSampler, vUV - off).b);
+  c = floor(c * 24.0 + sqB4(floor(gl_FragCoord.xy / sqBlock))) / 24.0;   // 24 gradini, retino per blocco
+  gl_FragColor = vec4(c, 1.0);
+}`;
+
 /** I filtri che devono stare in coda (dopo quelli della pipeline), nell'ordine; per ultimo viene comunque quello dello stile a pixel. */
 export const TAIL: PostProcess[] = [];
-let pix: PostProcess | null = null, was: { sharpen: boolean; grain: boolean } | null = null, detail = 0;
+let pix: PostProcess | null = null, blocchi: PostProcess | null = null, retro: PostProcess | null = null, lines: HTMLDivElement | null = null, block = 1, was: { sharpen: boolean; grain: boolean } | null = null, detail = 0;
 const modes = new Map<Texture, number>();
 
 /**
@@ -83,27 +122,46 @@ function textures(scene: Scene, engine: Engine, texels: number): void {
   }
 }
 
-/** `rows` = a quante righe si disegna (0 = stile spento); `scale` = la scala di risoluzione normale, a cui si torna; `cel` = il cel shading è acceso (vuole le texture semplificate anche senza lo stile a pixel). */
-export function setPixelStyle(scene: Scene, engine: Engine, camera: Camera, pipe: DefaultRenderingPipeline, rows: number, scale: number, cel: boolean): void {
+/** `rows` = a quante righe si disegna (0 = stile spento); `look` = "palette" (la tavolozza a mano, poche righe vere) o "retro" (colore pieno, blocchi fatti da un filtro); `scale` = la scala di risoluzione normale, a cui si torna; `cel` = il cel shading è acceso (vuole le texture semplificate anche senza lo stile a pixel). */
+export function setPixelStyle(scene: Scene, engine: Engine, camera: Camera, pipe: DefaultRenderingPipeline, rows: number, look: "palette" | "retro", scale: number, cel: boolean): void {
   const canvas = engine.getRenderingCanvas();
+  const pal = rows > 0 && look === "palette", ret = rows > 0 && look === "retro";
   was ??= { sharpen: pipe.sharpenEnabled, grain: pipe.grainEnabled };
-  if (canvas) canvas.style.imageRendering = rows ? "pixelated" : "";
-  if (rows) {
+  if (canvas) canvas.style.imageRendering = pal ? "pixelated" : "";
+  if (pal) {
     const full = engine.getRenderHeight(true) * engine.getHardwareScalingLevel();   // le righe vere dello schermo
     engine.setHardwareScalingLevel(Math.max(1, full / rows));
     pipe.samples = 1; pipe.fxaaEnabled = false; pipe.sharpenEnabled = false; pipe.grainEnabled = false;
-  } else { engine.setHardwareScalingLevel(scale); pipe.sharpenEnabled = was.sharpen; pipe.grainEnabled = was.grain; }
-  textures(scene, engine, rows > 0 ? -TEXELS : cel ? CEL_TEXELS : 0);
-  // il filtro dei colori deve restare l'ultimo: la pipeline, quando cambia, riattacca i suoi dopo di lui. Lo si rimette
-  // in coda un paio di fotogrammi dopo (quando la pipeline ha finito di ricostruirsi)
+  } else {
+    engine.setHardwareScalingLevel(scale);
+    pipe.sharpenEnabled = ret ? false : was.sharpen; pipe.grainEnabled = ret ? false : was.grain;   // (grana e nitidezza a piena risoluzione sporcherebbero i blocchi)
+  }
+  textures(scene, engine, pal ? -TEXELS : cel ? CEL_TEXELS : 0);
+  // le righe dello schermo: un velo sopra il canvas, alla risoluzione vera dello schermo
+  if (ret && !lines && canvas) {
+    lines = document.createElement("div");
+    lines.style.cssText = "position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(to bottom,transparent 0 2px,rgba(0,0,0,0.14) 2px 3px)";
+    canvas.after(lines);
+  }
+  if (lines) lines.style.display = ret ? "" : "none";
+  block = ret ? Math.max(1, Math.round(engine.getRenderHeight() / rows)) : 1;
+  const sizes = (p: PostProcess): void => { p.onApplyObservable.add((e) => { e.setFloat2("sqScreen", p.width, p.height); e.setFloat("sqBlock", Math.max(1, Math.round(p.height / rows) || block)); }); };
+  // (in HDR come il disegno del mondo che riceve, o il bloom non trova più le luci sopra 1)
+  if (!blocchi) { blocchi = new PostProcess("blocchi", "sqBlocchi", ["sqScreen", "sqBlock"], null, 1, null, Texture.BILINEAR_SAMPLINGMODE, engine, false, null, Constants.TEXTURETYPE_HALF_FLOAT); sizes(blocchi); }
+  if (!retro) { retro = new PostProcess("retro", "sqRetro", ["sqScreen", "sqBlock"], null, 1, null, Texture.BILINEAR_SAMPLINGMODE, engine); sizes(retro); }
+  // il filtro dei colori deve restare l'ultimo e quello dei blocchi il primo: la pipeline, quando cambia, riattacca i suoi
+  // in fondo. Li si rimette al loro posto un paio di fotogrammi dopo (quando la pipeline ha finito di ricostruirsi)
   pix ??= new PostProcess("pixel", "sqPixel", [], null, 1, null, Texture.NEAREST_SAMPLINGMODE, engine);
-  const p = pix;
+  const p = pix, b = blocchi, r = retro;
   let wait = 3;
   const o = scene.onBeforeRenderObservable.add(() => {
     if (--wait > 0) return;
     scene.onBeforeRenderObservable.remove(o);
+    camera.detachPostProcess(b);
+    if (ret) camera.attachPostProcess(b, 0);
     for (const t of TAIL) { camera.detachPostProcess(t); camera.attachPostProcess(t); }
-    camera.detachPostProcess(p);
-    if (rows) camera.attachPostProcess(p);
+    camera.detachPostProcess(p); camera.detachPostProcess(r);
+    if (pal) camera.attachPostProcess(p);
+    if (ret) camera.attachPostProcess(r);
   });
 }
