@@ -597,6 +597,16 @@ float sqWh(vec2 p, float t) {
     vec3 sqEnv = pow(sqSky, vec3(2.2)) * mix(0.3, 1.1, smoothstep(-0.1, 0.5, sqR.y));
     float sqGl = pow(max(dot(sqR, sqSunDir), 0.0), 420.0) * 1.3 + 0.12 * pow(max(dot(sqR, sqSunDir), 0.0), 40.0);
     color.rgb = mix(color.rgb, sqEnv, sqF) + sqSunCol * sqGl;
+    // dove l'acqua cade (cascatelle, rapide: la normale vera della striscia non guarda in su) è schiuma: chiara, a fili che scendono
+    float sqFall = smoothstep(0.02, 0.16, 1.0 - abs(normalize(vNormalW).y));
+    vec2 sqDn = normalize(vNormalW.xz + vec2(1e-4));   // (la normale pende a valle: di traverso alla corrente i fili sono fitti, lungo sono lunghi)
+    float sqStr = 0.7 + 0.3 * sqGn(vec2(dot(vPositionW.xz, vec2(-sqDn.y, sqDn.x)) * 2.4, vPositionW.y * 0.22 + sqTime * 1.4));
+    color.rgb = mix(color.rgb, (pow(sqSky, vec3(2.2)) * 2.6 + sqSunCol * 0.22 + 0.02) * sqStr, sqFall * 0.92);
+    // (questo punto viene dopo la nebbia del materiale e dopo la conversione in lineare: la nebbia va rimessa, o da lontano
+    // l'acqua resta nitida; il suo colore, dato in gamma, va elevato a 2,2 come il cielo qui sopra)
+    #ifdef FOG
+    color.rgb = mix(pow(sqSky, vec3(2.2)), color.rgb, CalcFogFactor());
+    #endif
   `);
   const attach = m.AttachAfterBind.bind(m);
   m.AttachAfterBind = (mesh, effect) => {
@@ -710,9 +720,10 @@ function lantern(M: Mason, x: number, y: number, z: number, id: string): void {
  */
 function rise(M: Mason, x: number, z: number): number { const p = M.world(x, 0, z); return townGround(p.x, p.z) - p.y; }
 /** Lo zoccolo: se sotto l'ingombro (centrato nell'origine) il suolo scende, un basamento di pietra fino a terra. */
-function footing(M: Mason, w: number, d: number): void {
-  const drop = Math.max(...[[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sz]) => -rise(M, sx * w / 2, sz * d / 2)));
-  if (drop > 0.05) M.box("stone", -w / 2 - 0.08, -drop - 0.3, -d / 2 - 0.08, w / 2 + 0.08, 0.02, d / 2 + 0.08, { tint: DARK });
+function footing(M: Mason, w: number, d: number, cz = 0): void {
+  let drop = 0;   // (lungo tutto il perimetro, non solo ai quattro angoli: sotto un edificio lungo il suolo può scendere a metà)
+  for (let i = 0; i <= 8; i++) for (const [x, z] of [[-w / 2 + w * i / 8, cz - d / 2], [-w / 2 + w * i / 8, cz + d / 2], [-w / 2, cz - d / 2 + d * i / 8], [w / 2, cz - d / 2 + d * i / 8]]) drop = Math.max(drop, -rise(M, x, z));
+  if (drop > 0.05) M.box("stone", -w / 2 - 0.08, -drop - 0.3, cz - d / 2 - 0.08, w / 2 + 0.08, 0.02, cz + d / 2 + 0.08, { tint: DARK });
 }
 
 function lamppost(M: Mason, x: number, z: number, id: string): void {
@@ -1092,7 +1103,7 @@ function stairs(M: Mason, c: ChildDef): void {
 
 /** Il teatro coperto, all'italiana: la sala, il fondo curvo della platea, il tetto a padiglione, il portico sulla facciata (+Z). */
 function theatre(M: Mason): void {
-  footing(M, 26, 46);
+  footing(M, 25, 46, -5.4);
   M.box("plaster", -12, 0, -16, 12, 18, 17);
   M.drum("plaster", 0, -16, 12, 0, 18, {}, 12, 24);
   M.box("stone", -12.3, 0, -16, 12.3, 1.2, 17.3, { tint: DARK });
@@ -1202,7 +1213,16 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     const guard = def.gate?.interior ? def.gate : null, trim = guard ? 0.8 : 0, gk = def.gate?.scale ?? 1;   // (la porta ingrandita: le mura la raggiungono più in là)
     const gp = def.gate?.at ?? [-hx, 0], gy = rad(def.gate?.yaw ?? -90);
     /** Sull'acqua (le mura si aprono dove passa il fiume). */
-    const wet = (x: number, z: number): boolean => !!def.river && townGround(TOWN.x + x, TOWN.z + z) < def.river.level + 0.6;
+    const wet = (x: number, z: number): boolean => {
+      const r = def.river;
+      if (!r) return false;
+      if (!r.widths) return townGround(TOWN.x + x, TOWN.z + z) < r.level + 0.6;
+      return r.line.some(([ax, az], i) => {   // (un torrente a più quote: conta la distanza dalla mezzeria)
+        if (!i) return false;
+        const [px, pz] = r.line[i - 1], dx = ax - px, dz = az - pz, k = Math.min(1, Math.max(0, ((x - px) * dx + (z - pz) * dz) / (dx * dx + dz * dz)));
+        return Math.hypot(x - px - dx * k, z - pz - dz * k) < Math.max(r.widths![i - 1], r.widths![i]) / 2 + 2.5;
+      });
+    };
     if (def.walls) {
       // ── mura a poligono, che seguono il suolo: tratti di 8 m circa, ognuno alla quota del suo mezzo con lo zoccolo fino a terra ──
       const ring = def.walls, t = 0.8;
@@ -1211,7 +1231,7 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
         const L = Math.hypot(bx - ax, bz - az), n = Math.max(1, Math.round(L / 8)), l = L / n, yaw = Math.atan2(-(bz - az), bx - ax);
         for (let k = 0; k < n && L > 0.5; k++) {
           const mx = ax + (bx - ax) * (k + 0.5) / n, mz = az + (bz - az) * (k + 0.5) / n;
-          if (wet(mx, mz)) continue;
+          if (wet(mx, mz) || (def.river?.widths && [-0.5, -0.25, 0.25, 0.5].some((f) => wet(mx + (bx - ax) / n * f, mz + (bz - az) / n * f)))) continue;
           M.in(mx, rise(M, mx, mz), mz, yaw, () => {
             const drop = Math.max(0, -rise(M, -l / 2, 0), -rise(M, l / 2, 0)), h = l / 2 + 0.05;
             M.box("stone", -h, -drop - 0.3, -t, h, 8, t);
@@ -1281,6 +1301,21 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     // ── il fiume: un nastro d'acqua alla sua quota, più largo dell'alveo (le sponde lo coprono) ──
     if (def.river) {
       const r = def.river, y = r.level - TOWN.y, hw = r.width / 2 + 4;
+      if (r.levels || r.widths) {
+        // un torrente: una striscia sola con quota e larghezza per punto. Fra due punti alla stessa quota l'acqua è una vasca
+        // piana; dove la quota salta in pochi metri la striscia cade (una cascatella) da una briglia di pietra.
+        const P = r.line, n = P.length, lv = (i: number): number => (r.levels?.[i] ?? r.level) - TOWN.y, w = (i: number): number => (r.widths?.[i] ?? r.width) / 2;
+        const edge = P.map(([x, z], i): [V3, V3] => {
+          const [px, pz] = P[Math.max(0, i - 1)], [qx, qz] = P[Math.min(n - 1, i + 1)], l = Math.hypot(qx - px, qz - pz) || 1, nx = -(qz - pz) / l * (w(i) + 2.5), nz = (qx - px) / l * (w(i) + 2.5);
+          return [[x - nx, lv(i), z - nz], [x + nx, lv(i), z + nz]];
+        });
+        for (let i = 0; i < n - 1; i++) {
+          const [ax, az] = P[i], [bx, bz] = P[i + 1], l = Math.hypot(bx - ax, bz - az), dy = lv(i + 1) - lv(i), nl = Math.hypot(l, dy);
+          // (la normale vera: piana nelle vasche, inclinata dove l'acqua scende; il materiale ci legge dove fare la schiuma)
+          M.poly("acqua", [edge[i][0], edge[i][1], edge[i + 1][1], edge[i + 1][0]], [-dy * (bx - ax) / l / nl, l / nl, -dy * (bz - az) / l / nl]);
+          if (lv(i) - lv(i + 1) > 0.5 && l < 6) M.in(ax, lv(i), az, Math.atan2(-(bz - az), bx - ax), () => M.box("stone", -0.9, -(lv(i) - lv(i + 1)) - 1.5, -w(i) - 1.5, 0.15, -0.07, w(i) + 1.5, { tint: DARK }));   // la briglia
+        }
+      } else
       for (let i = 0; i < r.line.length - 1; i++) {
         const [ax, az] = r.line[i], [bx, bz] = r.line[i + 1], l = Math.hypot(bx - ax, bz - az), nx = -(bz - az) / l * hw, nz = (bx - ax) / l * hw, ex = (bx - ax) / l * hw, ez = (bz - az) / l * hw;
         M.poly("acqua", [[ax - ex - nx, y, az - ez - nz], [ax - ex + nx, y, az - ez + nz], [bx + ex + nx, y, bz + ez + nz], [bx + ex - nx, y, bz + ez - nz]], [0, 1, 0]);
@@ -1295,6 +1330,7 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     cattedrale: (c) => place(c, () => {
       const L = 11.5, open = !!c.interior;
       enter(c, rad(c.yaw), [19, 29]);
+      footing(M, 19.4, 26.6, -1.4);
       if (open) {   // guscio: la navata senza coperchio; dei muri di testa resta ciò che si vede da fuori (il resto è dietro torri, facciata e abside, e dentro lo fa l'interno)
         for (const s of [-1, 1]) {
           // il muro della navata coi vani delle quattro bifore (lungo il muro, x locale = s · (centro − z))
@@ -1374,6 +1410,7 @@ export function createTown(scene: Scene, def: LocationDef, opts: { editor?: bool
     municipio: (c) => place(c, () => {
       const open = !!c.interior;
       enter(c, rad(c.yaw), [22, 11]);
+      footing(M, 22, 11);
       if (open) {   // guscio: tre muri, la facciata col vano del portone nell'arco di mezzo, il marcapiano come cornice (dentro ci passano il solaio e la scala)
         for (const s of [-1, 1]) wallFace(M, "stone", s * 11, -5.5, s * 11, 5.5, 0, 4.4, [s, 0, 0]);
         wallFace(M, "stone", -11, -5.5, 11, -5.5, 0, 4.4, [0, 0, -1]);

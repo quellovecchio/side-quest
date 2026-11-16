@@ -19,7 +19,7 @@ import { DbError, type Db, type LocationDef } from "../data/db";
 export const WORLD = 320;
 export const HALF = WORLD / 2;
 /** Quanto il terreno prosegue a est della conca (la valle della città). */
-export const EAST = 350;
+export const EAST = 400;
 // ⚠️ Questi valori arrivano dal file con `layWorld`: sono gli stessi oggetti per tutta la partita (si riempiono sul posto)
 // e vanno letti solo DENTRO le funzioni, mai al caricamento di un modulo (lì sono ancora vuoti).
 /** Dove comincia la partita (il luogo `spawn` del file). */

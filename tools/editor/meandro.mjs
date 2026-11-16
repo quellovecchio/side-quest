@@ -1,7 +1,7 @@
-// Mette nel file dei dati la pianta che tools/blender/meandro.py ha prodotto (la città sul meandro), lasciando com'è il resto
+// Mette nel file dei dati la pianta che tools/citta/fianco.py ha prodotto (la città sul fianco del monte), lasciando com'è il resto
 // del file: la città (posizione, rettangolo, porta, mura, fiume, elementi, posti, percorsi, selciati, verde), la cripta
 // (spostata accanto alla nuova cattedrale) e il giro di Lumier (rifatto sui lampioni nuovi).
-//   node tools/editor/meandro.mjs <meandro.json>
+//   node tools/editor/meandro.mjs <fianco.json>
 import { readFileSync, writeFileSync } from "node:fs";
 import { writeValues } from "./dbwrite.mjs";
 

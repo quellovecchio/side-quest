@@ -1,0 +1,60 @@
+A. IL SUOLO DENTRO LE MURA (a più di 8 m dalla riva)
+   quote 2.9 … 26.1 m (acqua a 2.8 m); area 43979 m²
+     0–  5%   54.6%  piano, ci si costruisce
+     5– 12%   14.9%  in salita, via carrabile
+    12– 30%   20.8%  ripido: scale, terrazze
+    30– 60%    7.5%  scarpata
+    60–100%    2.2%  parete (oltre il 60%)
+   la cima: 360 m² entro 1,5 m dalla quota massima; la cattedrale ne occupa 1129 m²
+
+B. GLI EDIFICI  (#indice in children; quota del piano = suolo al centro, come rise() nel gioco)
+   81 edifici, 5 con difetti
+     0  sospeso
+     5  interrato
+     0  ingresso contro
+     0  ingresso sul vuoto
+     0  senza via
+     0  sopra una via
+     0  nelle mura
+     0  nel fiume
+     0  compenetrato
+   #25  casa05          (5, -1) quota 9.2: interrato: il suolo sale di 0.6 m dentro l'ingombro
+   #27  casa08          (55, 1) quota 18.6: interrato: il suolo sale di 0.6 m dentro l'ingombro
+   #69  casa.povera     (-7, 95) quota 7.9: interrato: il suolo sale di 0.6 m dentro l'ingombro
+   #79  casa.povera     (-3, 80) quota 7.9: interrato: il suolo sale di 0.7 m dentro l'ingombro
+   #80  casa.povera     (7, 82) quota 8.9: interrato: il suolo sale di 0.6 m dentro l'ingombro
+
+C. LE VIE  (pendenza lungo la via sul suolo vero; di traverso: il suolo 1,5 m oltre il bordo rispetto alla mezzeria)
+   cubetti #0             larga 39.0  lunga    42 m  dislivello  +0.0  max   0%  usci  3
+   cubetti #1             larga 30.0  lunga    30 m  dislivello  +0.0  max   0%  usci  3
+   cubetti #2             larga 26.0  lunga    22 m  dislivello  +0.2  max   3%  usci  2
+   lastre #3              larga 12.0  lunga    10 m  dislivello  +0.5  max   7%  usci  0
+   lastre #4              larga  6.0  lunga    49 m  dislivello  +0.0  max   0%  usci  2
+   lastre #5              larga  6.0  lunga    10 m  dislivello  +0.3  max   3%  usci  0
+   lastre #6              larga  5.0  lunga   140 m  dislivello +13.9  max  12%  usci  5
+   cubetti #7             larga  5.0  lunga   192 m  dislivello +13.9  max  13%  usci 11
+   lastre #8              larga  4.6  lunga    97 m  dislivello  -0.4  max   3%  usci  5  ⚠ in trincea: il terreno a fianco sale di 1.8 m in (19, 18); sul ciglio: il terreno a fianco scende di 3.1 m in (18, -17)
+   lastre #9              larga  4.6  lunga   119 m  dislivello  -0.4  max  10%  usci  4  ⚠ in trincea: il terreno a fianco sale di 2.6 m in (44, 23)
+   cubetti #10            larga  4.6  lunga   129 m  dislivello  -0.3  max   1%  usci  2
+   cubetti #11            larga  4.6  lunga    47 m  dislivello  +0.8  max   2%  usci  1  ⚠ sul ciglio: il terreno a fianco scende di 1.8 m in (115, -30)
+   lastre #12             larga  4.6  lunga    72 m  dislivello  +0.6  max   1%  usci  6
+   lastre #13             larga  4.6  lunga    55 m  dislivello  +0.3  max   1%  usci  2
+   ciottoli #14           larga  4.6  lunga    28 m  dislivello  +0.2  max   1%  usci  0  ⚠ non serve nessun uscio
+   ciottoli #15           larga  4.6  lunga   131 m  dislivello  +1.2  max   3%  usci 13
+   ciottoli #16           larga  4.6  lunga   114 m  dislivello +11.1  max  11%  usci 19
+   lastre #17             larga  4.0  lunga    12 m  dislivello  -0.7  max   6%  usci  0
+   ciottoli #18           larga  4.0  lunga    12 m  dislivello  -0.5  max   5%  usci  1
+   lastre #19             larga  4.0  lunga    22 m  dislivello  -0.5  max   2%  usci  1
+   ciottoli #20           larga  4.0  lunga    12 m  dislivello  -0.2  max   2%  usci  0
+   ciottoli #21           larga  4.6  lunga   148 m  dislivello  +0.2  max   1%  usci 12
+   ciottoli #22           larga  4.0  lunga    66 m  dislivello  +0.1  max   1%  usci  1
+   ciottoli #23           larga  4.0  lunga     4 m  dislivello  +0.0  max   0%  usci  0
+   ciottoli #24           larga  4.6  lunga    64 m  dislivello  -0.2  max   4%  usci  0  ⚠ in trincea: il terreno a fianco sale di 2.9 m in (-21, -19); non serve nessun uscio
+   scala #152             larga  6.0  lunga    74 m  dislivello +13.9  max  19%  usci  6
+   scala #153             larga  4.0  lunga    34 m  dislivello  +5.2  max  16%  usci  2
+   giunzioni fra nastri di selciato (un nastro finisce dentro un altro: lì la texture si interrompe)
+   61 giunzioni, 33 quasi ad angolo retto (nessun raccordo: due nastri sovrapposti)
+
+D. LA RETE DEI PERCORSI
+   259 nodi, 4 vicoli ciechi dentro le mura senza un uscio a 9 m: (113, -11), (-82, 46), (-80, 46), (-96, 75)
+   54 m di percorso dentro le mura senza selciato, scala o ponte sotto

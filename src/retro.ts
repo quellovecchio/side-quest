@@ -80,9 +80,10 @@ class MirrorPlugin extends MaterialPluginBase {
   override prepareDefines(defines: Record<string, unknown>): void { defines.SQMIRROR = true; }
   override getClassName(): string { return "MirrorPlugin"; }
   override getSamplers(s: string[]): void { s.push("sqMirror"); }
-  override getUniforms() { return { ubo: [{ name: "sqMir", size: 4, type: "vec4" }], fragment: "uniform vec4 sqMir;" }; }
+  override getUniforms() { return { ubo: [{ name: "sqMir", size: 4, type: "vec4" }, { name: "sqMirY", size: 1, type: "float" }], fragment: "uniform vec4 sqMir; uniform float sqMirY;" }; }
   override bindForSubMesh(ubo: UniformBuffer): void {
     ubo.updateFloat4("sqMir", this.eng.getRenderWidth(), this.eng.getRenderHeight(), mirror && on.reflections ? 1 : 0, performance.now() / 1000);
+    ubo.updateFloat("sqMirY", mirror ? mirror.mirrorPlane.d : 0);   // (la quota dello specchio)
     if (mirror) ubo.setTexture("sqMirror", mirror);
   }
   override getCustomCode(type: string): Record<string, string> | null {
@@ -90,7 +91,8 @@ class MirrorPlugin extends MaterialPluginBase {
     return {
       CUSTOM_FRAGMENT_DEFINITIONS: "uniform sampler2D sqMirror;",
       CUSTOM_FRAGMENT_BEFORE_FRAGCOLOR: `
-        if (sqMir.z > 0.5) {
+        // (solo l'acqua alla quota dello specchio: le vasche alte e le cascate del torrente leggerebbero un riflesso non loro, nero)
+        if (sqMir.z > 0.5 && abs(vPositionW.y - sqMirY) < 0.25) {
           vec3 sqMv = normalize(vEyePosition.xyz - vPositionW);
           float sqMf = 0.06 + 0.94 * pow(1.0 - clamp(sqMv.y, 0.0, 1.0), 4.0);
           vec2 sqMw = vec2(sin(vPositionW.x * 1.7 + sqMir.w * 1.3) + sin(vPositionW.z * 2.3 - sqMir.w * 1.1), cos(vPositionW.z * 1.9 + sqMir.w)) * 0.004;
@@ -129,7 +131,7 @@ export function setRetroExtras(scene: Scene, engine: Engine, camera: Camera, x: 
   // riflessi: lo specchio si disegna solo a meno di 150 m dall'acqua
   water ??= scene.getMeshByName("town_acqua");
   if (x.reflections && water && !mirror) {
-    const y = water.getBoundingInfo().boundingBox.maximumWorld.y, w = water;
+    const y = water.getBoundingInfo().boundingBox.minimumWorld.y, w = water;   // (il torrente ha più quote: lo specchio sta sulla più bassa, il tratto in piano)
     // (a un quarto: sotto i blocchi basta; niente vegetazione a istanze né particelle, e solo ciò che sta entro 80 m)
     mirror = new MirrorTexture("specchio", { ratio: 0.25 }, scene, true);
     mirror.mirrorPlane = new Plane(0, -1, 0, y);
@@ -144,7 +146,7 @@ export function setRetroExtras(scene: Scene, engine: Engine, camera: Camera, x: 
     scene.onBeforeRenderObservable.add(() => {
       if (mirror) {
         const b = water!.getBoundingInfo().boundingBox, p = camera.globalPosition;
-        const near = on.reflections && p.y > b.maximumWorld.y && p.x > b.minimumWorld.x - 150 && p.x < b.maximumWorld.x + 150 && p.z > b.minimumWorld.z - 150 && p.z < b.maximumWorld.z + 150;
+        const near = on.reflections && p.y > b.minimumWorld.y && p.x > b.minimumWorld.x - 150 && p.x < b.maximumWorld.x + 150 && p.z > b.minimumWorld.z - 150 && p.z < b.maximumWorld.z + 150;
         const i = scene.customRenderTargets.indexOf(mirror);
         if (near && i < 0) scene.customRenderTargets.push(mirror); else if (!near && i >= 0) scene.customRenderTargets.splice(i, 1);
       }

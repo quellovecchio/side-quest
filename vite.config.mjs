@@ -11,8 +11,8 @@ import { writeValues } from "./tools/editor/dbwrite.mjs";
 const FIELDS = ["children", "walks", "spots", "green", "paving"];
 
 const DB = new URL("./public/data/db.json", import.meta.url);
-/** Le modifiche al terreno (terrain.ts, `LIFT`): Int16 per vertice, 671 × 321. */
-const LIFT = new URL("./public/data/terreno.bin", import.meta.url), LIFT_BYTES = (320 + 350 + 1) * 321 * 2;   // (WORLD + EAST + 1) × (WORLD + 1): terrain.ts
+/** Le modifiche al terreno (terrain.ts, `LIFT`): Int16 per vertice, 721 × 321. */
+const LIFT = new URL("./public/data/terreno.bin", import.meta.url), LIFT_BYTES = (320 + 400 + 1) * 321 * 2;   // (WORLD + EAST + 1) × (WORLD + 1): terrain.ts
 
 function editorSave() {
   return {

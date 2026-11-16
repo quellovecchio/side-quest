@@ -1,6 +1,6 @@
 # 0014. La città sul meandro: rilievo da Blender, pianta generata, nomi conservati
 
-- Stato: accettata
+- Stato: sostituita dalla [0015](0015-citta-sul-fianco-del-monte.md) (16 novembre 2026)
 - Data: 2026-11-13
 
 ## Contesto

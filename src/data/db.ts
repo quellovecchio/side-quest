@@ -99,7 +99,8 @@ export interface LocationDef {
   /** Le mura come poligono chiuso nel riferimento del luogo (senza: il rettangolo di `ground.rect`); seguono il suolo. */
   walls?: [number, number][];
   /** Il fiume che attraversa il luogo: la mezzeria, la larghezza e la quota dell'acqua (assoluta). L'alveo è nel rilievo. */
-  river?: { line: [number, number][]; width: number; level: number };
+  /** Un torrente che scende ha in più una quota e una larghezza per PUNTO (`levels`, `widths`): due punti alla stessa quota sono una vasca piana, un salto fra due punti vicini è una cascatella. `width` e `level` restano la larghezza massima e la quota più bassa. */
+  river?: { line: [number, number][]; width: number; level: number; levels?: number[]; widths?: number[] };
 }
 
 /** Un tracciato nel mondo: `trail` è un sentiero; `road` una strada che scende a un insediamento (`to`) e arriva alla sua porta. */
@@ -378,7 +379,7 @@ export function parseDb(raw: unknown): Db {
       spots: (x) => x.or({}, (v) => v.map((s) => s.obj<SpotDef>({ at: (n) => n.at(), yaw: (n) => n.or(0, (a) => a.num(-360, 360.001)) }))),
       gate: (x) => x.or<LocationDef["gate"]>(undefined, (g) => g.obj({ id: (n) => n.str(), interior: (n) => n.or(undefined, (s) => s.one("porta")), seed: (n) => n.or(undefined, (s) => s.num(0)), scale: (n) => n.or(1, (s) => s.num(0.5, 3)), at: (n) => n.or(undefined, (s) => s.at()), yaw: (n) => n.or(undefined, (s) => s.num(-360, 360.001)) })),
       walls: (x) => x.or(undefined, (v) => v.line()),
-      river: (x) => x.or<LocationDef["river"]>(undefined, (r) => r.obj({ line: (n) => n.line(), width: (n) => n.num(2, 60), level: (n) => n.num() })),
+      river: (x) => x.or<LocationDef["river"]>(undefined, (r) => r.obj({ line: (n) => n.line(), width: (n) => n.num(2, 60), level: (n) => n.num(), levels: (n) => n.or(undefined, (v) => v.list((y) => y.num())), widths: (n) => n.or(undefined, (v) => v.list((y) => y.num(2, 60))) })),
     })),
     roads: (r) => r.list((d) => d.obj<RoadDef>({ id: (x) => x.str(), kind: (x) => x.one("trail", "road"), line: (x) => x.line(), to: (x) => x.or(undefined, (s) => s.str()) })),
   });
@@ -406,6 +407,7 @@ export function parseDb(raw: unknown): Db {
     if (!l.ground) throw new DbError(`${at}.ground: a un insediamento servono il rettangolo delle mura e la quota`);
     if (l.ground.rect.some((h) => h < 10)) throw new DbError(`${at}.ground.rect: mezzi lati da 10 m in su`);
     if (l.walls && (l.walls.length < 3 || l.walls.some(([x, z]) => Math.abs(x) > l.ground!.rect[0] + 0.01 || Math.abs(z) > l.ground!.rect[1] + 0.01))) throw new DbError(`${at}.walls: un poligono di almeno tre punti, dentro il rettangolo di ground.rect`);
+    if (l.river && [l.river.levels, l.river.widths].some((v) => v && v.length !== l.river!.line.length)) throw new DbError(`${at}.river: levels e widths, se ci sono, hanno un numero per punto della mezzeria`);
     l.paving.forEach((p, j) => {
       const [[ax, az], [bx, bz]] = p.line;
       // (due punti allineati: una striscia dritta, piatta; altrimenti un nastro lungo la spezzata, che segue il suolo)
